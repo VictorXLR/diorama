@@ -10,6 +10,7 @@ here so the rest of the server never reaches for ``os.getenv`` directly:
   DIORAMA_RELOAD        - "on" for uvicorn autoreload (default: off)
   DIORAMA_CORS_ORIGINS  - comma-separated allowed origins (default: local dev)
   DIORAMA_DB            - sqlite path for session persistence (default: disabled)
+  DIORAMA_WEB_DIST      - built frontend to serve at "/" (default: ../web/dist)
   DIORAMA_MAX_READ_BYTES / DIORAMA_MAX_OUTPUT_BYTES
 """
 
@@ -29,6 +30,9 @@ DEFAULT_CORS_ORIGINS = (
     "http://localhost:8000",
     "http://127.0.0.1:8000",
 )
+
+# ``server/diorama/config.py`` -> repo root -> ``web/dist``.
+DEFAULT_WEB_DIST = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -71,15 +75,22 @@ class Settings:
     cors_origins: List[str] = field(default_factory=lambda: list(DEFAULT_CORS_ORIGINS))
     database_path: Optional[Path] = None
     allow_credentials: bool = False
+    web_dist: Optional[Path] = None
 
     @property
     def code_enabled(self) -> bool:
         return self.workspace_root is not None
 
+    @property
+    def frontend_enabled(self) -> bool:
+        """True when a built frontend is present and can be served at "/"."""
+        return self.web_dist is not None and (self.web_dist / "index.html").is_file()
+
 
 def load_settings() -> Settings:
     workspace = os.getenv("DIORAMA_WORKSPACE")
     database = os.getenv("DIORAMA_DB")
+    web_dist = os.getenv("DIORAMA_WEB_DIST")
     origins_env = os.getenv("DIORAMA_CORS_ORIGINS")
     if origins_env:
         origins = [origin.strip() for origin in origins_env.split(",") if origin.strip()]
@@ -99,6 +110,7 @@ def load_settings() -> Settings:
         cors_origins=origins,
         database_path=Path(database).expanduser() if database else None,
         allow_credentials=allow_credentials,
+        web_dist=Path(web_dist).expanduser().resolve() if web_dist else DEFAULT_WEB_DIST,
     )
 
 

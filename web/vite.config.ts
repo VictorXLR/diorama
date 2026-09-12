@@ -14,4 +14,13 @@ export default defineConfig({
   define: {
     'process.env.IS_PREACT': JSON.stringify('true'),
   },
+  // In dev the app runs on :5173 but the API/WS live on the backend. Proxy them
+  // so the same-origin default in App.tsx works in both dev and production.
+  server: {
+    proxy: {
+      '/api': { target: 'http://localhost:8000', changeOrigin: true },
+      '/health': { target: 'http://localhost:8000', changeOrigin: true },
+      '/ws': { target: 'ws://localhost:8000', ws: true },
+    },
+  },
 })

@@ -179,3 +179,54 @@ def test_cli_analyze_writes_excalidraw_scene(tmp_path, capsys):
     assert scene["type"] == "excalidraw"
     assert any(element["type"] == "frame" for element in scene["elements"])
     assert any(element["type"] == "rectangle" for element in scene["elements"])
+
+
+# --------------------------------------------------------------------------- #
+# Frontend serving
+# --------------------------------------------------------------------------- #
+
+
+def _fake_dist(tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text('<!doctype html><div id="root"></div>')
+    (dist / "assets" / "app.js").write_text("console.log('hi')")
+    return dist
+
+
+def test_frontend_enabled_only_when_build_present(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIORAMA_WEB_DIST", str(tmp_path / "missing"))
+    assert load_settings().frontend_enabled is False
+    dist = _fake_dist(tmp_path)
+    monkeypatch.setenv("DIORAMA_WEB_DIST", str(dist))
+    assert load_settings().frontend_enabled is True
+
+
+def test_mount_frontend_serves_spa_and_assets(tmp_path):
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from diorama.server import mount_frontend
+
+    app = FastAPI()
+
+    @app.get("/api/thing")
+    async def thing():
+        return {"ok": True}
+
+    assert mount_frontend(app, _fake_dist(tmp_path)) is True
+    client = TestClient(app)
+    root = client.get("/")
+    assert root.status_code == 200
+    assert 'id="root"' in root.text
+    assert client.get("/assets/app.js").status_code == 200
+    # API routes still win over the SPA mount.
+    assert client.get("/api/thing").json() == {"ok": True}
+
+
+def test_mount_frontend_is_noop_without_build(tmp_path):
+    from fastapi import FastAPI
+
+    from diorama.server import mount_frontend
+
+    assert mount_frontend(FastAPI(), tmp_path / "nope") is False

@@ -18,7 +18,10 @@ import type {
   ServerMessage,
 } from '@/types/context';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+// Default to the origin that served the app, so the built bundle talks to
+// whatever host/port is serving it. Override with VITE_API_BASE_URL / VITE_WS_URL
+// for split deployments (or the Vite dev server, which proxies to the backend).
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? window.location.origin;
 const WEBSOCKET_URL = import.meta.env.VITE_WS_URL ?? `${API_BASE_URL.replace(/^http/, 'ws').replace(/\/$/, '')}/ws`;
 
 const EMPTY_ELEMENTS: WhiteboardElements = [];

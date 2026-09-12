@@ -93,6 +93,13 @@ def _run_server() -> int:
     reset_settings_cache()
     settings = get_settings()
     print(f"Serving on http://{settings.host}:{settings.port}")
+    if settings.frontend_enabled:
+        print(f"Frontend:  http://{settings.host}:{settings.port}/  (from {settings.web_dist})")
+    else:
+        print(
+            "Frontend not built — run `bun run build` in web/ (or use `bun run dev` on :5173). "
+            f"Looked in {settings.web_dist}"
+        )
     uvicorn.run("diorama.app:app", host=settings.host, port=settings.port, reload=settings.reload)
     return 0
 

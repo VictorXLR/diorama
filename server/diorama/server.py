@@ -3,10 +3,12 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from diorama.agents.base import AgentContext, PatchEvent, ResponseEvent, StatusEvent, ThoughtEvent
@@ -287,6 +289,7 @@ async def health_check() -> Dict[str, Any]:
         "workspace": str(workspace.root) if workspace is not None else None,
         "execEnabled": bool(workspace and workspace.allow_exec),
         "persistence": store.enabled,
+        "frontendServed": settings.frontend_enabled,
         "capabilities": CAPABILITIES,
     }
 
@@ -584,6 +587,22 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
         except (WebSocketDisconnect, RuntimeError, OSError):
             # Client already went away; nothing left to report to.
             logger.info("Client disconnected before error could be delivered: session %s", session_id)
+
+
+def mount_frontend(application: FastAPI, directory: Optional[Path]) -> bool:
+    """Serve the built SPA at "/" when a build is present.
+
+    Mounted last so every API and WebSocket route wins; the mount only handles
+    the leftover paths (``/``, ``/assets/...``).  Returns whether it mounted.
+    """
+    if directory is None or not (directory / "index.html").is_file():
+        return False
+    application.mount("/", StaticFiles(directory=str(directory), html=True), name="web")
+    logger.info("Serving built frontend from %s", directory)
+    return True
+
+
+FRONTEND_SERVED = mount_frontend(app, settings.web_dist)
 
 
 if __name__ == "__main__":
