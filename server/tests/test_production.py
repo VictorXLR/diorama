@@ -93,6 +93,59 @@ def test_session_store_disabled_is_a_noop(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# File changes surfaced to the client
+# --------------------------------------------------------------------------- #
+
+
+def test_summarize_file_changes_counts_and_classifies():
+    from diorama.server import summarize_file_changes
+
+    result = summarize_file_changes(
+        [
+            {
+                "path": "a.py",
+                "before": "x = 1\n",
+                "after": "x = 2\n",
+                "diff": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2",
+            },
+            {"path": "new.py", "before": "", "after": "A = 1\n", "diff": "--- a/new.py\n+++ b/new.py\n@@\n+A = 1"},
+            {"path": ""},  # no path -> skipped
+        ]
+    )
+    assert [change.path for change in result] == ["a.py", "new.py"]
+    assert result[0].change == "modified"
+    assert result[0].additions == 1
+    assert result[0].deletions == 1
+    assert result[1].change == "created"
+    assert result[1].additions == 1
+
+
+def test_chat_message_persists_file_changes():
+    message = ChatMessage.model_validate(
+        {
+            "id": "m1",
+            "sender": "agent",
+            "content": "done",
+            "timestamp": "10:00 AM",
+            "fileChanges": [
+                {"path": "a.py", "change": "modified", "diff": "+x", "additions": 1, "deletions": 0}
+            ],
+        }
+    )
+    session = {
+        "session_id": "sess-files",
+        "context": None,
+        "messages": [message],
+        "visual_elements": [],
+        "files": {},
+        "turns": [],
+    }
+    restored = deserialize_session(serialize_session(session))
+    assert restored["messages"][0].file_changes[0].path == "a.py"
+    assert restored["messages"][0].file_changes[0].additions == 1
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 

@@ -17,7 +17,7 @@ from diorama.config import Settings, get_settings
 from diorama.data.default_contexts import DEFAULT_ARCHITECTURE_CONTEXT, MICROSERVICES_CONTEXT
 from diorama.persistence import SessionStore
 from diorama.models.canvas import CanvasFile
-from diorama.models.chat import ChatMessage, VisualUpdate
+from diorama.models.chat import ChatMessage, FileChange, VisualUpdate
 from diorama.models.context import ContextVisualization
 from diorama.models.protocol import (
     AgentChatMessage,
@@ -208,6 +208,34 @@ async def send_context_update(
     await websocket.send_text(update.model_dump_json(by_alias=True, exclude_none=True))
 
 
+def summarize_file_changes(changes: Optional[list[Dict[str, Any]]]) -> list[FileChange]:
+    """Turn raw tool change records into compact, client-safe file changes."""
+    summary: list[FileChange] = []
+    for change in changes or []:
+        path = change.get("path")
+        if not path:
+            continue
+        diff = change.get("diff") or ""
+        before = change.get("before")
+        additions = 0
+        deletions = 0
+        for line in diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                additions += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                deletions += 1
+        summary.append(
+            FileChange(
+                path=path,
+                change="created" if before in (None, "") else "modified",
+                diff=diff,
+                additions=additions,
+                deletions=deletions,
+            )
+        )
+    return summary
+
+
 async def send_agent_message(
     websocket: WebSocket,
     session_data: Dict[str, Any],
@@ -219,6 +247,7 @@ async def send_agent_message(
     questions: Optional[list[str]] = None,
     turn_id: Optional[str] = None,
     changed_element_ids: Optional[list[str]] = None,
+    file_changes: Optional[list[Dict[str, Any]]] = None,
 ) -> None:
     message = AgentChatMessage(
         id=f"agent-{int(time.time() * 1000)}",
@@ -229,6 +258,7 @@ async def send_agent_message(
         questions=questions or None,
         turnId=turn_id,
         changedElementIds=changed_element_ids,
+        fileChanges=summarize_file_changes(file_changes) or None,
     )
     # Persist as a plain ChatMessage so reconnects replay a homogeneous history.
     session_data["messages"].append(ChatMessage.model_validate(message.model_dump(by_alias=True, exclude={"type"})))
@@ -526,8 +556,9 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                             element_count=event.elements_added,
                             suggestions=event.suggestions,
                             questions=event.questions,
-                            turn_id=turn_id if event.changed_element_ids else None,
+                            turn_id=turn_id if event.changed_element_ids or event.file_changes else None,
                             changed_element_ids=event.changed_element_ids or None,
+                            file_changes=event.file_changes or None,
                         )
                         await send_status(websocket, "idle", "Ready")
             except WebSocketDisconnect:

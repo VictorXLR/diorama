@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 from diorama.models.canvas import CanvasFile, VisualElements
-from diorama.models.chat import AgentStatus, ChatMessage, VisualUpdate
+from diorama.models.chat import AgentStatus, ChatMessage, FileChange, VisualUpdate
 from diorama.models.context import ContextVisualization
 
 # -------------------------------------------------------------
@@ -106,6 +106,7 @@ class AgentChatMessage(BaseModel):
     questions: Optional[List[str]] = None
     turn_id: Optional[str] = Field(default=None, alias="turnId")
     changed_element_ids: Optional[List[str]] = Field(default=None, alias="changedElementIds")
+    file_changes: Optional[List[FileChange]] = Field(default=None, alias="fileChanges")
 
 
 class PongMessage(BaseModel):

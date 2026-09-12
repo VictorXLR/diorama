@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowRight, Bot, Compass, Crosshair, HelpCircle, Network, RefreshCw, Send, Sparkles, Undo2, User } from 'lucide-react';
+import { ArrowRight, Bot, ChevronDown, ChevronRight, Compass, Crosshair, FileText, HelpCircle, Network, RefreshCw, Send, Sparkles, Undo2, User } from 'lucide-react';
 import { ConversationMenu } from '@/components/ConversationMenu';
 import type { Conversation } from '@/lib/store';
-import type { AgentStatus, ChatMessage } from '@/types/context';
+import type { AgentStatus, ChatMessage, FileChange } from '@/types/context';
 
 interface ChatPanelProps {
   activeConversationId: string | null;
@@ -33,6 +33,81 @@ function getStatusMessage(agentStatus: AgentStatus): string {
   };
 
   return statusMessages[agentStatus as Exclude<AgentStatus, 'idle'>];
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith('+++') || line.startsWith('---')) {
+    return 'text-slate-400 dark:text-slate-500';
+  }
+  if (line.startsWith('+')) {
+    return 'text-emerald-700 dark:text-emerald-400';
+  }
+  if (line.startsWith('-')) {
+    return 'text-rose-700 dark:text-rose-400';
+  }
+  if (line.startsWith('@@')) {
+    return 'text-indigo-600 dark:text-indigo-400';
+  }
+  return 'text-slate-600 dark:text-slate-300';
+}
+
+function FileChangeRow({ change }: { change: FileChange }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const hasDiff = change.diff.trim().length > 0;
+
+  let chevron: React.JSX.Element;
+  if (!hasDiff) {
+    chevron = <span className="w-3" />;
+  } else if (expanded) {
+    chevron = <ChevronDown className="h-3 w-3 shrink-0 text-slate-400" />;
+  } else {
+    chevron = <ChevronRight className="h-3 w-3 shrink-0 text-slate-400" />;
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+      <button
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left transition-colors hover:bg-slate-50 dark:hover:bg-slate-800"
+        disabled={!hasDiff}
+        onClick={() => setExpanded((value) => !value)}
+        type="button"
+      >
+        {chevron}
+        <FileText className="h-3 w-3 shrink-0 text-slate-400" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-700 dark:text-slate-200">
+          {change.path}
+        </span>
+        <span className="shrink-0 rounded-full border border-slate-200 px-1.5 text-[10px] text-slate-500 dark:border-slate-600 dark:text-slate-400">
+          {change.change === 'created' ? 'new' : 'edit'}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] text-emerald-600 dark:text-emerald-400">
+          +{change.additions}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] text-rose-600 dark:text-rose-400">
+          -{change.deletions}
+        </span>
+      </button>
+
+      <AnimatePresence initial={false}>
+        {expanded && hasDiff && (
+          <motion.div
+            animate={{ height: 'auto', opacity: 1 }}
+            className="overflow-hidden border-t border-slate-200 dark:border-slate-700"
+            exit={{ height: 0, opacity: 0 }}
+            initial={{ height: 0, opacity: 0 }}
+          >
+            <pre className="max-h-64 overflow-auto bg-slate-50 p-2 font-mono text-[10px] leading-relaxed dark:bg-slate-950">
+              {change.diff.split('\n').map((line, index) => (
+                <div className={diffLineClass(line)} key={`${index}-${line}`}>
+                  {line || ' '}
+                </div>
+              ))}
+            </pre>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 export function ChatPanel({
@@ -205,6 +280,20 @@ export function ChatPanel({
                         )}
                       </div>
                     </motion.div>
+                  )}
+
+                  {message.fileChanges && message.fileChanges.length > 0 && (
+                    <div className="mt-2.5 space-y-1.5 border-t border-slate-200/60 pt-2 dark:border-slate-700">
+                      <span className="flex items-center gap-1 text-[10px] font-semibold tracking-wider text-emerald-600 uppercase dark:text-emerald-400">
+                        <FileText className="h-3 w-3" />
+                        Files changed ({message.fileChanges.length})
+                      </span>
+                      <div className="space-y-1">
+                        {message.fileChanges.map((change) => (
+                          <FileChangeRow change={change} key={`${message.id}-${change.path}`} />
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   {message.questions && message.questions.length > 0 && (

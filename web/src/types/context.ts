@@ -24,6 +24,15 @@ export interface VisualUpdate {
   elementsAdded: number;
 }
 
+/** A workspace file the agent created or edited during a turn. */
+export interface FileChange {
+  path: string;
+  change: 'created' | 'modified';
+  diff: string;
+  additions: number;
+  deletions: number;
+}
+
 export interface ChatMessage {
   id: string;
   sender: ChatSender;
@@ -37,6 +46,8 @@ export interface ChatMessage {
   turnId?: string;
   /** Element ids the turn created or modified; used for highlight-on-hover. */
   changedElementIds?: string[];
+  /** Workspace files the turn created or edited, with unified diffs. */
+  fileChanges?: FileChange[];
 }
 
 /** A binary asset (image) referenced by an Excalidraw `image` element via `fileId`. */

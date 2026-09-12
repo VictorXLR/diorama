@@ -23,6 +23,18 @@ class VisualUpdate(BaseModel):
     elements_added: int = Field(default=0, alias="elementsAdded")
 
 
+class FileChange(BaseModel):
+    """A workspace file the agent created or edited during a turn."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str
+    change: Literal["created", "modified"] = "modified"
+    diff: str = ""
+    additions: int = 0
+    deletions: int = 0
+
+
 class ChatMessage(BaseModel):
     """A durable conversation message shared by the chat panel and agent."""
 
@@ -37,3 +49,4 @@ class ChatMessage(BaseModel):
     questions: Optional[List[str]] = None
     turn_id: Optional[str] = Field(default=None, alias="turnId")
     changed_element_ids: Optional[List[str]] = Field(default=None, alias="changedElementIds")
+    file_changes: Optional[List[FileChange]] = Field(default=None, alias="fileChanges")
