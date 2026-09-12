@@ -181,6 +181,56 @@ def test_cli_analyze_writes_excalidraw_scene(tmp_path, capsys):
     assert any(element["type"] == "rectangle" for element in scene["elements"])
 
 
+def test_cli_import_does_not_eagerly_bind_server():
+    """Importing the CLI must not construct the app (which binds the workspace).
+
+    Regression: ``diorama/__init__`` used to ``from diorama.app import app``, so
+    ``diorama dev <path>`` built the workspace *before* setting
+    ``DIORAMA_WORKSPACE`` and then served an unbound server.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = "import sys, diorama.cli; print('diorama.server' in sys.modules)"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"
+
+
+def test_package_does_not_import_app_eagerly():
+    """Importing the package must not construct the app (which binds the workspace).
+
+    A lazy ``__getattr__`` re-export cannot satisfy this *and* ``from diorama import
+    app``, because ``diorama.app`` is a real submodule: the ``from`` import probes
+    ``hasattr`` first, importing the submodule and shadowing the re-export with the
+    module object.  So the package stays import-light and the app is imported
+    explicitly (``from diorama.app import app``).
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import sys, diorama;"
+        "assert 'diorama.app' not in sys.modules, 'app imported eagerly';"
+        "print('ok')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+
+
 # --------------------------------------------------------------------------- #
 # Frontend serving
 # --------------------------------------------------------------------------- #
