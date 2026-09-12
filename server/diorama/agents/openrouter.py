@@ -17,7 +17,7 @@ from diorama.models.context import ContextVisualization
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_CHAT_COMPLETIONS_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-4o-mini"
+DEFAULT_OPENROUTER_MODEL = "~openai/gpt-sol-latest"
 # Canvas patches for rich scenes (many shapes, labels, arrows) can easily exceed
 # a few thousand tokens; a too-small budget truncates the JSON mid-string.
 DEFAULT_MAX_TOKENS = 16000
