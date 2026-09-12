@@ -9,7 +9,7 @@ relationships are drawn as ``route`` arrows between the file cards.  Cards carry
 from __future__ import annotations
 
 import math
-from typing import List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 from diorama.codebase.indexer import CodeGraph, CodeNode
 from diorama.visual.primitives import (

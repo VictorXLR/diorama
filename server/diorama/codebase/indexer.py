@@ -332,6 +332,36 @@ def _module_for_path(path: str, language: str) -> str:
     return "/".join(parts)
 
 
+def _python_module(path: str, package_dirs: set) -> str:
+    """Dotted module for a Python file, anchored at its package root.
+
+    A file like ``server/diorama/agents/base.py`` lives in a package chain
+    (``server/diorama`` and ``server/diorama/agents`` both hold ``__init__.py``)
+    so its module is ``diorama.agents.base`` -- not ``server.diorama.agents.base``.
+    Anchoring at the package root is what lets absolute imports such as
+    ``from diorama.agents.base import ...`` resolve, which matters whenever the
+    repo root is not itself the import root (e.g. a ``server/`` or ``src/`` layout).
+    """
+    stem = path
+    for suffix in (".pyi", ".py"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    parts = [part for part in stem.split("/") if part]
+    if not parts:
+        return ""
+    name = parts[-1]
+    dirs = parts[:-1]
+    # Longest suffix of directories that form a contiguous package chain.
+    start = len(dirs)
+    for i in range(len(dirs)):
+        if all("/".join(parts[: j + 1]) in package_dirs for j in range(i, len(dirs))):
+            start = i
+            break
+    module_parts = dirs[start:] + ([name] if name != "__init__" else [])
+    return ".".join(module_parts)
+
+
 def _build_resolver(nodes: Iterable[CodeNode]) -> Dict[str, str]:
     """Map many candidate module strings to a node id."""
     index: Dict[str, str] = {}
@@ -466,6 +496,21 @@ def build_code_graph(
                 is_test=is_test,
             )
         )
+
+    # Anchor Python modules at their package root so absolute imports resolve
+    # even when the repo root is not the import root (e.g. a ``server/`` layout).
+    package_dirs = {
+        node.path.rsplit("/", 1)[0]
+        for node in nodes
+        if node.language == "python"
+        and node.name in {"__init__.py", "__init__.pyi"}
+        and "/" in node.path
+    }
+    for node in nodes:
+        if node.language == "python":
+            module = _python_module(node.path, package_dirs)
+            if module:
+                node.module = module
 
     index = _build_resolver(nodes)
     edges: List[CodeEdge] = []

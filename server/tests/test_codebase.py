@@ -134,6 +134,20 @@ def test_indexer_resolves_typescript_relative_imports(tmp_path):
     assert ("file:web/index.ts", "file:web/thing.ts") in targets
 
 
+def test_indexer_anchors_python_modules_at_package_root(tmp_path):
+    # Repo root (".") is not the import root: the package lives under server/.
+    (tmp_path / "server" / "app").mkdir(parents=True)
+    (tmp_path / "server" / "app" / "__init__.py").write_text("")
+    (tmp_path / "server" / "app" / "main.py").write_text("from app.helper import run\n\ndef main():\n    return run()\n")
+    (tmp_path / "server" / "app" / "helper.py").write_text("def run():\n    return 1\n")
+
+    graph = build_code_graph(Workspace(tmp_path))
+    by_path = {node.path: node for node in graph.nodes}
+    assert by_path["server/app/main.py"].module == "app.main"
+    targets = {(edge.source, edge.target) for edge in graph.edges}
+    assert ("file:server/app/main.py", "file:server/app/helper.py") in targets
+
+
 def test_indexer_can_exclude_tests(tmp_path):
     graph = build_code_graph(Workspace(make_repo(tmp_path)), include_tests=False)
     assert all(not node.is_test for node in graph.nodes)
