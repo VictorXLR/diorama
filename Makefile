@@ -5,11 +5,14 @@
 #   web/     React + Excalidraw frontend (Bun)
 #
 # Common flows:
-#   make install        set up everything (venv + node deps)
-#   make dev            run the backend bound to WORKSPACE (serves built UI)
-#   make dev-all        run backend + Vite dev server together
-#   make test           run both test suites
-#   make index          summarize a repository's structure
+#   make install                    set up everything (venv + node deps)
+#   make server ~/Developer/proj    run the backend bound to a repo (serves built UI)
+#   make dev-all                    run backend + Vite dev server together
+#   make test                       run both test suites
+#   make index ~/Developer/proj     summarize a repository's structure
+#
+# Any target that takes a repository accepts it positionally (as above) or via
+# WORKSPACE=/path; the positional form wins.
 
 SHELL := /bin/bash
 
@@ -22,15 +25,20 @@ PIP        := $(VENV)/bin/pip
 DIORAMA    := $(VENV)/bin/diorama
 BUN        ?= bun
 
-# Repository the code tools bind to. Override, e.g.:
-#   make dev WORKSPACE=/Users/me/Developer/some-repo
+# Repository the code tools bind to. Either:
+#   make server ~/Developer/some-repo
+#   make server WORKSPACE=/Users/me/Developer/some-repo
+# The first word after the target is taken as the path (the shell has already
+# expanded `~`); that extra goal is turned into a no-op at the bottom of this file.
 WORKSPACE ?= .
+ARGS      := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+REPO      := $(if $(ARGS),$(firstword $(ARGS)),$(WORKSPACE))
 # Output path for `make analyze`.
 OUTPUT    ?= codebase.excalidraw
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-server install-web venv build test test-server \
-        test-web lint lint-web dev dev-web dev-all serve index analyze \
+        test-web lint lint-web server dev dev-web dev-all serve index analyze \
         clean distclean
 
 # --- help --------------------------------------------------------------------
@@ -40,7 +48,8 @@ help: ## Show this help
 		| sort \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "  WORKSPACE=$(WORKSPACE)   (override with: make dev WORKSPACE=/path/to/repo)"
+	@echo "  Repo-bound targets take a path:  make server ~/Developer/some-repo"
+	@echo "  (or WORKSPACE=/path; current default: $(WORKSPACE))"
 
 # --- install -----------------------------------------------------------------
 install: install-server install-web ## Install all dependencies (Python venv + web)
@@ -76,15 +85,17 @@ lint-web: ## Run ESLint over the web sources
 	cd $(WEB_DIR) && $(BUN) run lint
 
 # --- run ---------------------------------------------------------------------
-dev: ## Run the backend bound to WORKSPACE (serves the built UI)
-	$(DIORAMA) dev $(WORKSPACE)
+server: ## Run the backend bound to a repo:  make server ~/Developer/some-repo
+	$(DIORAMA) dev "$(REPO)"
+
+dev: server ## Alias for `server`
 
 dev-web: ## Run the Vite dev server (proxies API/WS to the backend)
 	cd $(WEB_DIR) && $(BUN) run dev
 
 dev-all: ## Run the backend and the Vite dev server together
 	@trap 'kill 0' INT TERM EXIT; \
-	$(DIORAMA) dev $(WORKSPACE) & \
+	$(DIORAMA) dev "$(REPO)" & \
 	(cd $(WEB_DIR) && $(BUN) run dev) & \
 	wait
 
@@ -92,11 +103,11 @@ serve: ## Run the backend with no repository bound
 	$(DIORAMA) serve
 
 # --- codebase harness --------------------------------------------------------
-index: ## Print a structural summary of WORKSPACE
-	$(DIORAMA) index $(WORKSPACE)
+index: ## Print a structural summary of a repo:  make index ~/Developer/some-repo
+	$(DIORAMA) index "$(REPO)"
 
-analyze: ## Export a codebase map of WORKSPACE to $(OUTPUT)
-	$(DIORAMA) analyze $(WORKSPACE) -o $(OUTPUT)
+analyze: ## Export a codebase map of a repo to $(OUTPUT)
+	$(DIORAMA) analyze "$(REPO)" -o $(OUTPUT)
 
 # --- clean -------------------------------------------------------------------
 clean: ## Remove build output and test caches
@@ -106,3 +117,12 @@ clean: ## Remove build output and test caches
 distclean: clean ## Also remove the venv, node_modules, and egg-info
 	rm -rf $(VENV) $(WEB_DIR)/node_modules
 	find . -type d -name '*.egg-info' -prune -exec rm -rf {} +
+
+# --- positional arguments ----------------------------------------------------
+# A path given after a target (e.g. `make server ~/Developer/x`) also shows up
+# as a goal; treat such extra goals as no-ops so make does not try to build them.
+ifneq ($(ARGS),)
+.PHONY: $(ARGS)
+$(ARGS):
+	@:
+endif
