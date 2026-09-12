@@ -147,6 +147,8 @@ export interface ConnectionAckMessage {
   type: 'connection_ack';
   sessionId: string;
   serverVersion: string;
+  /** Monotonic revision of the authoritative server-side scene. */
+  sceneVersion?: number;
   message: string;
   initialContext?: ContextVisualization;
   initialMessages?: ChatMessage[];
@@ -163,6 +165,8 @@ export interface AgentStatusMessage {
 
 export interface ContextUpdateMessage {
   type: 'context_update';
+  /** Monotonic revision of the authoritative server-side scene. */
+  sceneVersion?: number;
   context?: ContextVisualization | null;
   visualElements?: ExcalidrawSkeletonElement[];
   /** New or changed assets only; merge into the existing file map. */
@@ -205,6 +209,20 @@ export type ClientMessage =
       theme?: 'light' | 'dark';
       sessionId?: string;
       clientTimestamp?: string;
+    }
+  | {
+      /** Persist direct user edits without starting an agent turn. */
+      type: 'sync_scene';
+      visualElements: unknown[];
+      files?: CanvasFiles;
+      /** Server scene revision that this browser edit was based on. */
+      baseSceneVersion?: number;
+      sessionId?: string;
+    }
+  | {
+      /** Re-index the workspace and redraw only the generated codebase map. */
+      type: 'refresh_codebase_map';
+      sessionId?: string;
     }
   | {
       type: 'revert_turn';

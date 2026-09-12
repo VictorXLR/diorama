@@ -1,10 +1,11 @@
-import { Eraser, Moon, Radio, SquareDashedMousePointer, Sun } from 'lucide-react';
+import { Eraser, Moon, Radio, RefreshCw, SquareDashedMousePointer, Sun } from 'lucide-react';
 import type { Theme } from '@/lib/store';
 import type { ConnectionState } from '@/types/context';
 
 interface HeaderNavProps {
   connectionState: ConnectionState;
   onClearBoard: () => void;
+  onRefreshCodebaseMap: () => void;
   onToggleTheme: () => void;
   theme: Theme;
   workspaceTitle: string;
@@ -35,6 +36,7 @@ const HEADER_BUTTON_CLASS =
 export function HeaderNav({
   connectionState,
   onClearBoard,
+  onRefreshCodebaseMap,
   onToggleTheme,
   theme,
   workspaceTitle,
@@ -75,6 +77,16 @@ export function HeaderNav({
           type="button"
         >
           {isDark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+        </button>
+        <button
+          className={HEADER_BUTTON_CLASS}
+          disabled={connectionState !== 'connected'}
+          onClick={onRefreshCodebaseMap}
+          title="Re-index the bound workspace and refresh its codebase map"
+          type="button"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          <span className="hidden sm:inline">Refresh map</span>
         </button>
         <button
           className={HEADER_BUTTON_CLASS}

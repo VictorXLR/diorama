@@ -72,6 +72,11 @@ interface SessionUiState {
 export function App(): React.JSX.Element {
   const socketRef = useRef<WebSocket | null>(null);
   const excalidrawApiRef = useRef<ExcalidrawImperativeAPI | null>(null);
+  const sceneSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The server owns the authoritative scene revision. Keep it outside React
+  // state so a debounced browser edit captures the revision it was drawn
+  // against, rather than whichever revision happens to arrive before it sends.
+  const sceneVersionsRef = useRef<Map<string, number>>(new Map());
   // Keyed by conversation so switching conversations implicitly resets to "connecting / idle".
   const [sessionUi, setSessionUi] = useState<SessionUiState>({
     conversationId: null,
@@ -107,6 +112,20 @@ export function App(): React.JSX.Element {
     setSessionUi((previous) => ({ ...previous, agent }));
   }, []);
 
+  const replaceSceneVersion = useCallback((conversationId: string, sceneVersion?: number): void => {
+    if (typeof sceneVersion === 'number') {
+      sceneVersionsRef.current.set(conversationId, sceneVersion);
+    } else {
+      sceneVersionsRef.current.delete(conversationId);
+    }
+  }, []);
+
+  const noteSceneVersion = useCallback((conversationId: string, sceneVersion?: number): void => {
+    if (typeof sceneVersion === 'number') {
+      sceneVersionsRef.current.set(conversationId, sceneVersion);
+    }
+  }, []);
+
   // Apply the persisted theme to <html> so Tailwind's `dark:` variant kicks in.
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -133,6 +152,10 @@ export function App(): React.JSX.Element {
       // The server may have minted a different id (e.g. it restarted); keep the store in sync.
       const serverId = message.sessionId || conversationId;
       renameConversationId(conversationId, serverId);
+      // A connection ack is a complete snapshot, so replace rather than retain
+      // a revision from a previous connection or a locally generated id.
+      sceneVersionsRef.current.delete(conversationId);
+      replaceSceneVersion(serverId, message.sceneVersion);
 
       const stored = useWorkspaceStore.getState().conversations[serverId];
       const serverMessages = message.initialMessages ?? [];
@@ -156,11 +179,12 @@ export function App(): React.JSX.Element {
 
       setSessionUi({ conversationId: serverId, connection: 'connected', agent: 'idle' });
     },
-    [applyVisualElements, mergeFiles, renameConversationId, updateConversation],
+    [applyVisualElements, mergeFiles, renameConversationId, replaceSceneVersion, updateConversation],
   );
 
   const applyContextUpdate = useCallback(
     (conversationId: string, message: ContextUpdateMessage): void => {
+      noteSceneVersion(conversationId, message.sceneVersion);
       if (message.context !== undefined) {
         updateConversation(conversationId, { context: message.context ?? null });
       }
@@ -173,7 +197,7 @@ export function App(): React.JSX.Element {
         setHighlightIds([...message.changedElementIds]);
       }
     },
-    [applyVisualElements, mergeFiles, updateConversation],
+    [applyVisualElements, mergeFiles, noteSceneVersion, updateConversation],
   );
 
   useEffect(() => {
@@ -256,6 +280,53 @@ export function App(): React.JSX.Element {
     return true;
   }, []);
 
+  const cancelPendingSceneSync = useCallback((): void => {
+    if (sceneSyncTimerRef.current) {
+      clearTimeout(sceneSyncTimerRef.current);
+      sceneSyncTimerRef.current = null;
+    }
+  }, []);
+
+  const queueSceneSync = useCallback(
+    (conversationId: string, elements: WhiteboardElements, delay = 250): void => {
+      cancelPendingSceneSync();
+      // Preserve the revision at edit time. If the agent advances the board
+      // before this debounce fires, the server can safely reject this stale
+      // whole-scene snapshot instead of erasing the generated result.
+      const baseSceneVersion = sceneVersionsRef.current.get(conversationId);
+      sceneSyncTimerRef.current = setTimeout(() => {
+        const current = useWorkspaceStore.getState().conversations[conversationId];
+        if (current) {
+          sendSocketMessage({
+            type: 'sync_scene',
+            visualElements: elements,
+            files: current.files,
+            ...(baseSceneVersion === undefined ? {} : { baseSceneVersion }),
+          });
+        }
+        sceneSyncTimerRef.current = null;
+      }, delay);
+    },
+    [cancelPendingSceneSync, sendSocketMessage],
+  );
+
+  useEffect(() => cancelPendingSceneSync, [cancelPendingSceneSync]);
+
+  useEffect(() => {
+    cancelPendingSceneSync();
+  }, [activeConversationId, cancelPendingSceneSync]);
+
+  const handleElementsChange = useCallback(
+    (elements: WhiteboardElements): void => {
+      if (!activeConversationId) {
+        return;
+      }
+      updateConversation(activeConversationId, { whiteboardElements: elements });
+      queueSceneSync(activeConversationId, elements);
+    },
+    [activeConversationId, queueSceneSync, updateConversation],
+  );
+
   const handleSendMessage = useCallback(
     (text: string): void => {
       if (!activeConversationId) {
@@ -267,6 +338,12 @@ export function App(): React.JSX.Element {
       const sceneElements = api?.getSceneElements() ?? [];
       const selectedElementIds = Object.keys(api?.getAppState().selectedElementIds ?? {});
       const files = useWorkspaceStore.getState().conversations[activeConversationId]?.files ?? {};
+      // Do not let a direct-edit debounce queued before this turn arrive after
+      // the agent and overwrite its authoritative response.
+      if (socketRef.current?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      cancelPendingSceneSync();
       if (
         !sendSocketMessage({
           type: 'user_message',
@@ -280,6 +357,14 @@ export function App(): React.JSX.Element {
         return;
       }
 
+      // The server accepts this full scene snapshot before running the turn and
+      // advances its revision. Mirror that increment now so direct edits made
+      // while the turn runs carry the correct base revision.
+      const currentSceneVersion = sceneVersionsRef.current.get(activeConversationId);
+      if (currentSceneVersion !== undefined) {
+        sceneVersionsRef.current.set(activeConversationId, currentSceneVersion + 1);
+      }
+
       appendStoredMessage(activeConversationId, {
         id: `user-${Date.now()}`,
         sender: 'user',
@@ -288,7 +373,7 @@ export function App(): React.JSX.Element {
       });
       setAgentStatus('thinking');
     },
-    [activeConversationId, appendStoredMessage, sendSocketMessage, setAgentStatus, theme],
+    [activeConversationId, appendStoredMessage, cancelPendingSceneSync, sendSocketMessage, setAgentStatus, theme],
   );
 
   const handleRevertTurn = useCallback(
@@ -328,16 +413,29 @@ export function App(): React.JSX.Element {
       files: {},
       title: 'New conversation',
     });
+    cancelPendingSceneSync();
     if (sendSocketMessage({ type: 'reset_session' })) {
       setAgentStatus('working');
     }
-  }, [activeConversationId, sendSocketMessage, setAgentStatus, updateConversation]);
+  }, [activeConversationId, cancelPendingSceneSync, sendSocketMessage, setAgentStatus, updateConversation]);
 
   const handleClearBoard = useCallback((): void => {
     if (activeConversationId) {
       updateConversation(activeConversationId, { whiteboardElements: EMPTY_ELEMENTS });
+      cancelPendingSceneSync();
+      const baseSceneVersion = sceneVersionsRef.current.get(activeConversationId);
+      sendSocketMessage({
+        type: 'sync_scene',
+        visualElements: [],
+        files: {},
+        ...(baseSceneVersion === undefined ? {} : { baseSceneVersion }),
+      });
     }
-  }, [activeConversationId, updateConversation]);
+  }, [activeConversationId, cancelPendingSceneSync, sendSocketMessage, updateConversation]);
+
+  const handleRefreshCodebaseMap = useCallback((): void => {
+    sendSocketMessage({ type: 'refresh_codebase_map' });
+  }, [sendSocketMessage]);
 
   const handleCreateConversation = useCallback((): void => {
     createConversation();
@@ -358,6 +456,7 @@ export function App(): React.JSX.Element {
       <HeaderNav
         connectionState={connectionState}
         onClearBoard={handleClearBoard}
+        onRefreshCodebaseMap={handleRefreshCodebaseMap}
         onToggleTheme={toggleTheme}
         theme={theme}
         workspaceTitle={workspaceTitle}
@@ -370,6 +469,7 @@ export function App(): React.JSX.Element {
           highlightIds={highlightIds}
           onApiReady={handleApiReady}
           onClearBoard={handleClearBoard}
+          onElementsChange={handleElementsChange}
           theme={theme}
           title={workspaceTitle}
         />

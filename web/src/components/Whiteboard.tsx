@@ -4,6 +4,7 @@ import '@excalidraw/excalidraw/index.css';
 import type { BinaryFileData, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
 import { Maximize2, Sparkles, Trash2 } from 'lucide-react';
 import type { WhiteboardElements } from '@/lib/whiteboardGenerator';
+import { sceneSignature } from '@/lib/sceneSignature';
 import type { CanvasFiles } from '@/types/context';
 
 export interface WhiteboardProps {
@@ -13,6 +14,8 @@ export interface WhiteboardProps {
   /** Element ids to briefly glow (e.g. the agent's latest changes). */
   highlightIds?: string[] | null;
   onApiReady?: (api: ExcalidrawImperativeAPI) => void;
+  /** Receives direct user edits so they can be persisted and synced to the server. */
+  onElementsChange?: (elements: WhiteboardElements) => void;
   onClearBoard?: () => void;
   theme?: 'light' | 'dark';
   title?: string;
@@ -39,6 +42,7 @@ export function Whiteboard({
   files,
   highlightIds,
   onApiReady,
+  onElementsChange,
   onClearBoard,
   theme = 'light',
   title = 'Context canvas',
@@ -46,6 +50,7 @@ export function Whiteboard({
   const excalidrawApiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const previousElementsRef = useRef<WhiteboardElements>([]);
   const loadedFileIdsRef = useRef<Set<string>>(new Set());
+  const sceneSignatureRef = useRef(sceneSignature(elements));
   const resolvedFiles = files ?? EMPTY_FILES;
 
   // Register image assets before the elements that reference them render, otherwise Excalidraw
@@ -63,6 +68,21 @@ export function Whiteboard({
     }
   }, []);
 
+  const updateGeneratedScene = useCallback(
+    (
+      api: ExcalidrawImperativeAPI,
+      nextElements: WhiteboardElements,
+      captureUpdate: (typeof CaptureUpdateAction)[keyof typeof CaptureUpdateAction],
+    ): void => {
+      // Remember the durable content before the imperative update. Excalidraw
+      // emits onChange later from componentDidUpdate, after this call returns.
+      // A content signature remains correct across that async boundary.
+      sceneSignatureRef.current = sceneSignature(nextElements);
+      api.updateScene({ elements: nextElements as never, captureUpdate });
+    },
+    [],
+  );
+
   useEffect(() => {
     const api = excalidrawApiRef.current;
     if (api) {
@@ -79,10 +99,7 @@ export function Whiteboard({
 
     previousElementsRef.current = elements;
     syncFiles(api, resolvedFiles);
-    api.updateScene({
-      elements: elements as never,
-      captureUpdate: CaptureUpdateAction.EVENTUALLY,
-    });
+    updateGeneratedScene(api, elements, CaptureUpdateAction.EVENTUALLY);
 
     if (elements.length === 0) {
       return;
@@ -102,7 +119,7 @@ export function Whiteboard({
     }, 80);
 
     return () => clearTimeout(timer);
-  }, [elements, resolvedFiles, syncFiles]);
+  }, [elements, resolvedFiles, syncFiles, updateGeneratedScene]);
 
   // Flash the agent's latest changes by selecting them, then release the selection so the user's
   // next click behaves normally. Selection is theme-aware and needs no element mutation.
@@ -131,11 +148,11 @@ export function Whiteboard({
       syncFiles(api, resolvedFiles);
       if (previousElementsRef.current !== elements) {
         previousElementsRef.current = elements;
-        api.updateScene({ elements: elements as never, captureUpdate: CaptureUpdateAction.NEVER });
+        updateGeneratedScene(api, elements, CaptureUpdateAction.NEVER);
       }
       onApiReady?.(api);
     },
-    [elements, resolvedFiles, onApiReady, syncFiles],
+    [elements, resolvedFiles, onApiReady, syncFiles, updateGeneratedScene],
   );
 
   const handleFitToScreen = useCallback((): void => {
@@ -158,6 +175,10 @@ export function Whiteboard({
   }, []);
 
   const handleClear = useCallback((): void => {
+    // The button below owns this user action and persists it through
+    // onClearBoard. Do not also turn Excalidraw's imperative reset callback
+    // into a debounced whole-scene sync.
+    sceneSignatureRef.current = sceneSignature([]);
     excalidrawApiRef.current?.resetScene();
     previousElementsRef.current = [];
     loadedFileIdsRef.current = new Set();
@@ -182,6 +203,13 @@ export function Whiteboard({
           },
         }}
         excalidrawAPI={handleExcalidrawRef}
+        onChange={(nextElements) => {
+          const nextSignature = sceneSignature(nextElements);
+          if (nextSignature !== sceneSignatureRef.current) {
+            sceneSignatureRef.current = nextSignature;
+            onElementsChange?.([...nextElements] as WhiteboardElements);
+          }
+        }}
         initialData={{
           elements: elements as never,
           appState: {
