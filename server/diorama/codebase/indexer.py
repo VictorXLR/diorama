@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from diorama.codebase.parsers import TREE_SITTER_AVAILABLE, parse_source
 from diorama.codebase.workspace import Workspace
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +102,7 @@ class CodeNode:
     module: str = ""
     symbols: List[CodeSymbol] = field(default_factory=list)
     imports: List[str] = field(default_factory=list)
+    calls: List[str] = field(default_factory=list)
     is_test: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -113,6 +115,7 @@ class CodeNode:
             "module": self.module,
             "isTest": self.is_test,
             "imports": self.imports,
+            "calls": self.calls[:40],
             "symbols": [s.to_dict() for s in self.symbols],
         }
 
@@ -135,6 +138,7 @@ class CodeGraph:
     languages: Dict[str, int] = field(default_factory=dict)
     total_files: int = 0
     truncated: bool = False
+    parser: str = "tree-sitter" if TREE_SITTER_AVAILABLE else "regex"
 
     # ------------------------------------------------------------- summaries
 
@@ -151,6 +155,7 @@ class CodeGraph:
             "totalFiles": self.total_files,
             "indexedFiles": len(self.nodes),
             "truncated": self.truncated,
+            "parser": self.parser,
             "languages": self.languages,
             "nodes": [node.to_dict() for node in nodes],
             "edges": [edge.to_dict() for edge in edges],
@@ -216,14 +221,21 @@ _GENERIC_IMPORT_RE = re.compile(
 )
 
 
-def _parse_python(path: Path, source: str) -> Tuple[List[CodeSymbol], List[str]]:
+def _parse_python(path: Path, source: str) -> Tuple[List[CodeSymbol], List[str], List[str]]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return [], []
+        return [], [], []
     symbols: List[CodeSymbol] = []
     imports: List[str] = []
-
+    calls: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = _python_call_name(node.func)
+            if name and name not in calls:
+                calls.append(name)
+                if len(calls) >= 400:
+                    break
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             imports.extend(_python_imports(node))
@@ -261,7 +273,20 @@ def _parse_python(path: Path, source: str) -> Tuple[List[CodeSymbol], List[str]]
             target = node.targets[0] if isinstance(node, ast.Assign) and node.targets else getattr(node, "target", None)
             if isinstance(target, ast.Name) and target.id.isupper():
                 symbols.append(CodeSymbol(name=target.id, kind="constant", line=node.lineno))
-    return symbols, imports
+    return symbols, imports, calls
+
+
+def _python_call_name(node: ast.AST) -> Optional[str]:
+    """`a.b.c(...)` -> "a.b.c"; `f(...)` -> "f"."""
+    parts: List[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    elif not parts:
+        return None
+    return ".".join(reversed(parts))
 
 
 def _python_imports(node: ast.AST) -> List[str]:
@@ -301,6 +326,7 @@ def _name_of(node: ast.AST) -> Optional[str]:
 
 
 def _parse_script(source: str) -> Tuple[List[CodeSymbol], List[str]]:
+    """Regex fallback for JS/TS (kept for tests and environments without tree-sitter)."""
     imports = _JS_IMPORT_RE.findall(source) + _JS_REQUIRE_RE.findall(source)
     symbols: List[CodeSymbol] = []
     for match in _JS_SYMBOL_RE.finditer(source):
@@ -311,6 +337,16 @@ def _parse_script(source: str) -> Tuple[List[CodeSymbol], List[str]]:
 
 def _parse_generic(source: str) -> Tuple[List[CodeSymbol], List[str]]:
     return [], _GENERIC_IMPORT_RE.findall(source)
+
+
+def _parse_with_tree_sitter(suffix: str, source: str) -> Tuple[List[CodeSymbol], List[str], List[str]]:
+    """Syntax-aware extraction; transparently falls back to regex inside :mod:`parsers`."""
+    parsed = parse_source(suffix, source)
+    symbols = [
+        CodeSymbol(name=s.name, kind=s.kind, line=s.line, end_line=s.end_line, signature=s.signature)
+        for s in parsed.symbols
+    ]
+    return symbols, parsed.imports, sorted(parsed.calls)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,7 +427,16 @@ def _resolve_import(
     node: CodeNode,
     index: Dict[str, str],
 ) -> Optional[str]:
-    if not raw or raw.startswith(("@", "http")):
+    if not raw or raw.startswith("http"):
+        return None
+    # Path aliases (`@/lib/auth`, `~/components/x`) are the norm in Next/Vite/Nuxt
+    # projects and conventionally point at the repo root or `src/`. Scoped npm
+    # packages (`@scope/pkg`) never have a bare `@/` prefix, so this is unambiguous.
+    for alias in ("@/", "~/"):
+        if raw.startswith(alias):
+            target = raw[len(alias):]
+            return _first_match([target, f"src/{target}", f"{target}/index", f"src/{target}/index"], index)
+    if raw.startswith("@"):
         return None
     if node.language == "python":
         candidates = [raw]
@@ -472,13 +517,11 @@ def build_code_graph(
             continue
 
         if language == "python":
-            symbols, imports = _parse_python(path, source)
-        elif language in {"javascript", "typescript", "vue", "svelte"}:
-            symbols, imports = _parse_script(source)
+            symbols, imports, calls = _parse_python(path, source)
         elif language is not None:
-            symbols, imports = _parse_generic(source)
+            symbols, imports, calls = _parse_with_tree_sitter(path.suffix, source)
         else:
-            symbols, imports = [], []
+            symbols, imports, calls = [], [], []
 
         node_language = language or "config"
         languages_count[node_language] = languages_count.get(node_language, 0) + 1
@@ -493,6 +536,7 @@ def build_code_graph(
                 module=module,
                 symbols=symbols,
                 imports=[imp for imp in imports if imp],
+                calls=calls,
                 is_test=is_test,
             )
         )

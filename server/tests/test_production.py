@@ -181,6 +181,44 @@ def test_cli_analyze_writes_excalidraw_scene(tmp_path, capsys):
     assert any(element["type"] == "rectangle" for element in scene["elements"])
 
 
+# --------------------------------------------------------------------------- #
+# Codebase seeding (`diorama dev PATH` opens on the repo map)
+# --------------------------------------------------------------------------- #
+
+
+def test_bound_workspace_seeds_sessions_with_codebase_map(tmp_path, monkeypatch):
+    """Regression: ``dev`` bound the repo but every new board arrived empty."""
+    import diorama.server as server
+    from diorama.codebase.workspace import Workspace
+
+    seed = server.build_codebase_seed(Workspace(_sample_repo(tmp_path)))
+    assert seed is not None
+    assert seed["name"] == tmp_path.name
+    assert seed["indexedFiles"] == 3
+    assert seed["edges"] == 1
+    assert any(element["type"] == "frame" for element in seed["visual_elements"])
+
+    monkeypatch.setattr(server, "codebase_seed", seed)
+    session = server.build_initial_session("sess-seeded")
+    assert len(session["visual_elements"]) == len(seed["visual_elements"])
+    assert session["visual_elements"] is not seed["visual_elements"]  # per-session copy
+    welcome = session["messages"][0]
+    assert welcome.sender == "agent"
+    assert tmp_path.name in welcome.content and "1 import edge" in welcome.content
+    assert welcome.suggestions
+    assert server.workspace_context_for_agent()["repository"] == tmp_path.name
+
+
+def test_unbound_server_starts_with_empty_board(monkeypatch):
+    import diorama.server as server
+
+    assert server.build_codebase_seed(None) is None
+    monkeypatch.setattr(server, "codebase_seed", None)
+    session = server.build_initial_session("sess-empty")
+    assert session["visual_elements"] == [] and session["messages"] == []
+    assert server.workspace_context_for_agent() == {}
+
+
 def test_cli_import_does_not_eagerly_bind_server():
     """Importing the CLI must not construct the app (which binds the workspace).
 

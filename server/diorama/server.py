@@ -14,11 +14,13 @@ from pydantic import ValidationError
 from diorama.agents.base import AgentContext, PatchEvent, ResponseEvent, StatusEvent, ThoughtEvent
 from diorama.agents.context_agent import ContextAgent
 from diorama.agents.openrouter import OpenRouterContextModel
+from diorama.codebase.indexer import build_code_graph
+from diorama.codebase.visualize import graph_to_primitives
 from diorama.codebase.workspace import Workspace, WorkspaceError
 from diorama.config import Settings, get_settings
 from diorama.data.default_contexts import DEFAULT_ARCHITECTURE_CONTEXT, MICROSERVICES_CONTEXT
 from diorama.persistence import SessionStore
-from diorama.models.canvas import CanvasFile
+from diorama.models.canvas import CanvasFile, CanvasPatch, apply_canvas_patch
 from diorama.models.chat import ChatMessage, FileChange, VisualUpdate
 from diorama.models.context import ContextVisualization
 from diorama.models.protocol import (
@@ -91,14 +93,69 @@ def build_workspace(settings: Settings) -> Optional[Workspace]:
 
 workspace: Optional[Workspace] = build_workspace(settings)
 
+CODEBASE_MAP_MAX_NODES = 60
+CODEBASE_SUGGESTIONS = [
+    "Explain how this codebase is organized",
+    "Which files does the entry point depend on?",
+    "Find the biggest files and suggest how to split them",
+]
+
+
+def build_codebase_seed(workspace: Optional[Workspace]) -> Optional[Dict[str, Any]]:
+    """Index the bound repository and pre-render its map so a fresh board is never empty.
+
+    Returns ``None`` when no workspace is bound or indexing fails; the server then
+    behaves like a plain whiteboard.  The result is reused for every new session
+    and handed to the agent as ``workspaceContext`` so it knows what repo it is in.
+    """
+    if workspace is None:
+        return None
+    try:
+        graph = build_code_graph(workspace)
+        primitives = graph_to_primitives(
+            graph,
+            title=f"Codebase map · {workspace.root.name}",
+            max_nodes=CODEBASE_MAP_MAX_NODES,
+        )
+        elements = apply_canvas_patch([], CanvasPatch(primitives=primitives), theme="light")
+    except Exception:  # noqa: BLE001 - a broken repo must not take the server down
+        logger.exception("Could not build the codebase map for %s", workspace.root)
+        return None
+    drawn = min(len(graph.nodes), CODEBASE_MAP_MAX_NODES)
+    languages = ", ".join(f"{name} ({count})" for name, count in list(graph.languages.items())[:4])
+    logger.info(
+        "Indexed %s: %d files, %d import edges, %d canvas elements",
+        workspace.root, len(graph.nodes), len(graph.edges), len(elements),
+    )
+    return {
+        "root": str(workspace.root),
+        "name": workspace.root.name,
+        "totalFiles": graph.total_files,
+        "indexedFiles": len(graph.nodes),
+        "drawnFiles": drawn,
+        "edges": len(graph.edges),
+        "languages": graph.languages,
+        "languagesLabel": languages,
+        "truncated": graph.truncated or drawn < len(graph.nodes),
+        "visual_elements": elements,
+    }
+
+
+codebase_seed: Optional[Dict[str, Any]] = build_codebase_seed(workspace)
+
 if store.enabled:
     for _persisted in store.load_all().values():
         sessions[_persisted["session_id"]] = _persisted
 
 
 def build_initial_session(session_id: str) -> Dict[str, Any]:
-    """Create an empty session. The visual context is built entirely from the conversation."""
-    return {
+    """Create a session.
+
+    With no repository bound the board starts empty and is built entirely from
+    the conversation.  When ``diorama dev PATH`` bound a workspace, the session
+    opens on the pre-rendered codebase map with a welcome message describing it.
+    """
+    session: Dict[str, Any] = {
         "session_id": session_id,
         "context": None,
         "messages": [],
@@ -106,6 +163,29 @@ def build_initial_session(session_id: str) -> Dict[str, Any]:
         "files": {},
         "turns": [],
     }
+    if codebase_seed is not None:
+        session["visual_elements"] = copy.deepcopy(codebase_seed["visual_elements"])
+        session["messages"].append(build_codebase_welcome(codebase_seed))
+    return session
+
+
+def build_codebase_welcome(seed: Dict[str, Any]) -> ChatMessage:
+    scope = f"{seed['drawnFiles']} of {seed['indexedFiles']} files" if seed["truncated"] else f"all {seed['indexedFiles']} files"
+    content = (
+        f"Connected to {seed['name']} ({seed['root']}). "
+        f"I indexed {seed['indexedFiles']} source files ({seed['languagesLabel'] or 'no recognised languages'}) "
+        f"with {seed['edges']} import edges and drew {scope} on the board. "
+        "Each card is a file grouped by directory; arrows show imports. "
+        "Ask me to explain, navigate, or change the code and I will keep the board in sync."
+    )
+    return ChatMessage(
+        id="codebase-welcome",
+        sender="agent",
+        content=content,
+        timestamp=time.strftime("%I:%M %p"),
+        visualUpdate=VisualUpdate(summary="Rendered the codebase map.", elementsAdded=len(seed["visual_elements"])),
+        suggestions=list(CODEBASE_SUGGESTIONS),
+    )
 
 
 def get_or_create_session(session_id: Optional[str] = None) -> Dict[str, Any]:
@@ -171,6 +251,21 @@ def restore_files(session_data: Dict[str, Any], from_index: int) -> List[str]:
         except WorkspaceError as exc:
             logger.warning("Could not restore %s: %s", path, exc)
     return restored
+
+
+def workspace_context_for_agent() -> Dict[str, Any]:
+    """Compact repo facts for the model prompt (never the element list)."""
+    if codebase_seed is None:
+        return {}
+    return {
+        "repository": codebase_seed["name"],
+        "root": codebase_seed["root"],
+        "indexedFiles": codebase_seed["indexedFiles"],
+        "importEdges": codebase_seed["edges"],
+        "languages": codebase_seed["languages"],
+        "note": "The board already shows the codebase map (one card per file, arrows for imports). "
+        "Use index_codebase / read_file for details instead of redrawing it.",
+    }
 
 
 async def send_connection_ack(websocket: WebSocket, session_data: Dict[str, Any], message: str) -> None:
@@ -287,6 +382,7 @@ async def health_check() -> Dict[str, Any]:
         "tools": [tool.name for tool in agent.registry],
         "codeTools": [tool.name for tool in agent.code_registry],
         "workspace": str(workspace.root) if workspace is not None else None,
+        "codebase": {k: v for k, v in codebase_seed.items() if k != "visual_elements"} if codebase_seed else None,
         "execEnabled": bool(workspace and workspace.allow_exec),
         "persistence": store.enabled,
         "frontendServed": settings.frontend_enabled,
@@ -504,6 +600,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 files=session_data.get("files", {}),
                 viewport=payload.viewport,
                 workspace=workspace,
+                workspaceContext=workspace_context_for_agent(),
             )
 
             try:

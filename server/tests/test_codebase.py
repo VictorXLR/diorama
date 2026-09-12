@@ -8,6 +8,7 @@ from diorama.codebase.indexer import build_code_graph
 from diorama.codebase.visualize import graph_to_primitives
 from diorama.codebase.workspace import Workspace, WorkspaceError
 from diorama.tools import ToolContext, default_registry
+from diorama.visual.primitives import measure_primitive
 from diorama.tools.code import (
     EditFileArgs,
     ListDirArgs,
@@ -134,6 +135,27 @@ def test_indexer_resolves_typescript_relative_imports(tmp_path):
     assert ("file:web/index.ts", "file:web/thing.ts") in targets
 
 
+def test_indexer_resolves_path_alias_imports(tmp_path):
+    # Next/Vite-style `@/` alias pointing at src/; scoped npm packages must still be skipped.
+    (tmp_path / "src" / "app").mkdir(parents=True)
+    (tmp_path / "src" / "lib").mkdir()
+    (tmp_path / "src" / "components").mkdir()
+    (tmp_path / "src" / "app" / "page.tsx").write_text(
+        "import { useAuth } from '@/lib/auth'\n"
+        "import Card from '@/components/Card'\n"
+        "import { createClient } from '@supabase/supabase-js'\n"
+        "export default function Page() {}\n"
+    )
+    (tmp_path / "src" / "lib" / "auth.tsx").write_text("export function useAuth() {}\n")
+    (tmp_path / "src" / "components" / "Card.tsx").write_text("export default function Card() {}\n")
+
+    graph = build_code_graph(Workspace(tmp_path))
+    targets = {(edge.source, edge.target) for edge in graph.edges}
+    assert ("file:src/app/page.tsx", "file:src/lib/auth.tsx") in targets
+    assert ("file:src/app/page.tsx", "file:src/components/Card.tsx") in targets
+    assert len(graph.edges) == 2
+
+
 def test_indexer_anchors_python_modules_at_package_root(tmp_path):
     # Repo root (".") is not the import root: the package lives under server/.
     (tmp_path / "server" / "app").mkdir(parents=True)
@@ -179,6 +201,33 @@ def test_graph_to_primitives_handles_empty_graph(tmp_path):
     graph = build_code_graph(Workspace(tmp_path))
     primitives = graph_to_primitives(graph)
     assert [p.kind for p in primitives] == ["heading"]
+
+
+def test_codebase_frames_enclose_their_cards(tmp_path):
+    # A frame must enclose its cards using each card's measured height, or
+    # Excalidraw clips the text.  Long symbol names make cards taller than the
+    # nominal CARD_HEIGHT, so the frame cannot rely on the constant alone.
+    source = "from os import path\n\n" + "\n".join(
+        f"def function_number_{index}_with_an_extremely_long_descriptive_name():\n    return {index}\n"
+        for index in range(9)
+    )
+    (tmp_path / "module.py").write_text(source)
+
+    graph = build_code_graph(Workspace(tmp_path))
+    primitives = graph_to_primitives(graph, title="Repo")
+    frames = {primitive.id: primitive for primitive in primitives if primitive.kind == "frame"}
+    cards = [primitive for primitive in primitives if primitive.kind == "card"]
+    assert cards and frames
+
+    for card in cards:
+        frame = frames[card.frame]
+        anchor = measure_primitive(card)
+        assert anchor is not None
+        # The card is taller than the nominal constant, so this exercises real
+        # measurement rather than a fixed row height.
+        assert anchor.height > 168
+        assert frame.x <= card.x and card.x + card.width <= frame.x + frame.width
+        assert frame.y <= card.y and card.y + anchor.height <= frame.y + frame.height
 
 
 # --------------------------------------------------------------------------- #
