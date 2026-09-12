@@ -168,11 +168,55 @@ def _is_anchor(element: Dict[str, Any]) -> bool:
     return isinstance(custom, dict) and custom.get("role") == "anchor"
 
 
+FRAME_FIT_PADDING = 20
+"""Gap kept between a frame's edge and its content when a frame is auto-fitted."""
+
+
+def _fit_frames_to_children(elements: List[Dict[str, Any]], children: Dict[str, List[str]]) -> None:
+    """Grow primitive frames so they enclose their children.
+
+    Excalidraw clips anything drawn outside a frame, so a frame smaller than its
+    contents hides them.  Only primitive-produced frames are resized (native
+    frames belong to the user and are left untouched), and frames are only ever
+    grown -- a deliberately larger frame keeps its size.
+    """
+    by_id = {element["id"]: element for element in elements}
+    for frame_id, child_ids in children.items():
+        frame = by_id.get(frame_id)
+        if frame is None or not _primitive_of(frame):
+            continue
+        boxes = []
+        for child in (by_id.get(child_id) for child_id in child_ids):
+            if child is None or not isinstance(child.get("x"), (int, float)) or not isinstance(child.get("y"), (int, float)):
+                continue
+            boxes.append(
+                (
+                    child["x"],
+                    child["y"],
+                    child["x"] + (child.get("width") or 0),
+                    child["y"] + (child.get("height") or 0),
+                )
+            )
+        if not boxes:
+            continue
+        left = min(box[0] for box in boxes) - FRAME_FIT_PADDING
+        top = min(box[1] for box in boxes) - FRAME_FIT_PADDING
+        right = max(box[2] for box in boxes) + FRAME_FIT_PADDING
+        bottom = max(box[3] for box in boxes) + FRAME_FIT_PADDING
+        x, y = frame["x"], frame["y"]
+        width, height = frame.get("width") or 0, frame.get("height") or 0
+        new_left, new_top = min(x, left), min(y, top)
+        new_right, new_bottom = max(x + width, right), max(y + height, bottom)
+        frame["x"], frame["y"] = new_left, new_top
+        frame["width"], frame["height"] = new_right - new_left, new_bottom - new_top
+
+
 def finalize_scene(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep frame membership consistent for agent-generated content.
 
     Native (user-drawn) elements are never rewritten; only elements produced by
-    primitives get their ``frameId``/``children`` reconciled.
+    primitives get their ``frameId``/``children`` reconciled, and primitive frames
+    are grown to enclose their children so nothing is clipped.
     """
     frame_ids = {element["id"] for element in elements if element.get("type") in {"frame", "magicframe"}}
     children: Dict[str, List[str]] = {frame_id: [] for frame_id in frame_ids}
@@ -185,6 +229,7 @@ def finalize_scene(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for element in elements:
         if element["id"] in children and _primitive_of(element):
             element["children"] = children[element["id"]]
+    _fit_frames_to_children(elements, children)
     return elements
 
 

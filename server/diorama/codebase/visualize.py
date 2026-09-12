@@ -20,6 +20,7 @@ from diorama.visual.primitives import (
     LegendPrimitive,
     Primitive,
     RoutePrimitive,
+    measure_primitive,
 )
 
 CARD_WIDTH = 320
@@ -125,10 +126,35 @@ def graph_to_primitives(
     for group_name, members in _group_nodes(nodes, depth=group_depth):
         members = sorted(members, key=lambda node: node.path)
         columns = min(MAX_COLUMNS, max(1, math.ceil(math.sqrt(len(members)))))
-        rows = math.ceil(len(members) / columns)
-        frame_width = columns * CARD_WIDTH + (columns - 1) * CARD_GAP + 2 * FRAME_PAD
-        frame_height = FRAME_TITLE + rows * CARD_HEIGHT + (rows - 1) * CARD_GAP + FRAME_PAD
         frame_id = _sanitize(f"frame-{group_name}")
+
+        # Measure each card up front: rows must be as tall as their tallest card
+        # and the frame sized to enclose its content, since Excalidraw frames
+        # clip anything that spills outside them.
+        cards: List[Tuple[CardPrimitive, float]] = []
+        for node in members:
+            card = CardPrimitive(
+                kind="card",
+                id=_sanitize(node.id),
+                frame=frame_id,
+                title=node.name,
+                body=_body_lines(node),
+                x=0,
+                y=0,
+                width=CARD_WIDTH,
+                accent=_accent(node),
+            )
+            anchor = measure_primitive(card)
+            cards.append((card, anchor.height if anchor else CARD_HEIGHT))
+
+        rows = math.ceil(len(cards) / columns)
+        row_heights = [0.0] * rows
+        for index, (_, height) in enumerate(cards):
+            row = index // columns
+            row_heights[row] = max(row_heights[row], height)
+
+        frame_width = columns * CARD_WIDTH + (columns - 1) * CARD_GAP + 2 * FRAME_PAD
+        frame_height = FRAME_TITLE + sum(row_heights) + (rows - 1) * CARD_GAP + FRAME_PAD
         primitives.append(
             FramePrimitive(
                 kind="frame",
@@ -140,26 +166,22 @@ def graph_to_primitives(
                 height=frame_height,
             )
         )
-        for index, node in enumerate(members):
-            column = index % columns
-            row = index // columns
-            x = FRAME_PAD + column * (CARD_WIDTH + CARD_GAP)
-            y = cursor_y + FRAME_TITLE + row * (CARD_HEIGHT + CARD_GAP)
-            card_id = _sanitize(node.id)
-            accent = _accent(node)
-            if node.language not in languages_present:
-                languages_present.append(node.language)
+
+        row_tops: List[float] = []
+        top = cursor_y + FRAME_TITLE
+        for height in row_heights:
+            row_tops.append(top)
+            top += height + CARD_GAP
+
+        for index, (card, _) in enumerate(cards):
+            if members[index].language not in languages_present:
+                languages_present.append(members[index].language)
             primitives.append(
-                CardPrimitive(
-                    kind="card",
-                    id=card_id,
-                    frame=frame_id,
-                    title=node.name,
-                    body=_body_lines(node),
-                    x=x,
-                    y=y,
-                    width=CARD_WIDTH,
-                    accent=accent,
+                card.model_copy(
+                    update={
+                        "x": FRAME_PAD + (index % columns) * (CARD_WIDTH + CARD_GAP),
+                        "y": row_tops[index // columns],
+                    }
                 )
             )
         cursor_y += frame_height + FRAME_GAP

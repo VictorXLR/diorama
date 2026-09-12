@@ -890,6 +890,17 @@ def expand_primitive(primitive: Primitive, theme: str, resolve: AnchorResolver) 
     return expansion
 
 
+def measure_primitive(primitive: Primitive, theme: str = "light") -> Optional[Anchor]:
+    """The bounding box a self-contained primitive expands to.
+
+    Only valid for primitives that do not reference other elements (everything
+    except ``route``), and only for primitives whose size does not depend on the
+    surrounding scene.  Layout code uses this to size a container before the
+    scene exists.
+    """
+    return expand_primitive(primitive, theme, lambda _ref: None).anchor
+
+
 def anchor_from_element(element: Dict[str, Any]) -> Optional[Anchor]:
     """Bounding box for a scene element, if it has one."""
     x, y = element.get("x"), element.get("y")
