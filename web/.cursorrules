@@ -1,0 +1,23 @@
+# Agent Guidelines for Diorama Web
+
+## Commands (Always verify before completing)
+- Typecheck: `npm run build` (runs `tsc -b && vite build`)
+- Unit Tests: `npm run test:vitest`
+- Mutation Tests: `npm run test:mutate`
+- Linter: `npm run lint`
+- Dead Code: `npm run knip`
+- Duplication: `npm run jscpd`
+- Full Verification: `npm run verify`
+
+## Layer Boundaries & Architecture
+- `src/components`: UI presentational components. Can import from `src/lib`, `src/types`, `src/contracts`.
+- `src/lib`: Domain logic & client helpers. UI-free. MUST NEVER import from `src/components` or `src/App`.
+- `src/types`: Domain interfaces & type definitions. Pure types only. MUST NEVER import UI or implementations.
+- `src/contracts`: Shared API schemas and DTOs.
+- Always use `@/` alias paths (e.g., `@/types/trip`). Relative parent imports (`../`) are strictly forbidden.
+
+## Coding Standards & Anti-AI Slop
+- Strict TypeScript: No `any`, no non-null assertions (`!`), specify explicit module boundary return types.
+- No Service Rounding: Never perform `Math.round()`, `Math.floor()`, `Math.ceil()`, or `.toFixed()` in `src/lib` or domain services. Rounding belongs strictly at the presentation layer.
+- React Rules: Avoid `useEffect` for derived state or imperative event handling. Keep imperative canvas handles in refs.
+- Tests: Every public service function must have unit tests with high mutation survival kill rates.
