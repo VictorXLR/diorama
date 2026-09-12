@@ -48,6 +48,7 @@ def serialize_session(session_data: Dict[str, Any]) -> Dict[str, Any]:
                 "visual_elements": turn.get("visual_elements", []),
                 "files": _dump_files(turn.get("files", {})),
                 "file_edits": dict(turn.get("file_edits", {})),
+                "codebase_map_element_ids": list(turn.get("codebase_map_element_ids", [])),
             }
         )
     return {
@@ -57,6 +58,8 @@ def serialize_session(session_data: Dict[str, Any]) -> Dict[str, Any]:
         "visual_elements": session_data.get("visual_elements", []),
         "files": _dump_files(session_data.get("files", {})),
         "turns": turns,
+        "codebase_map_element_ids": list(session_data.get("codebase_map_element_ids", [])),
+        "scene_version": session_data.get("scene_version", 0),
     }
 
 
@@ -80,6 +83,8 @@ def deserialize_session(record: Dict[str, Any]) -> Dict[str, Any]:
         "visual_elements": record.get("visual_elements", []),
         "files": files,
         "turns": record.get("turns", []),
+        "codebase_map_element_ids": record.get("codebase_map_element_ids", []),
+        "scene_version": record.get("scene_version", 0),
     }
 
 

@@ -209,6 +209,36 @@ def test_bound_workspace_seeds_sessions_with_codebase_map(tmp_path, monkeypatch)
     assert server.workspace_context_for_agent()["repository"] == tmp_path.name
 
 
+def test_refreshing_codebase_map_replaces_only_generated_elements(tmp_path):
+    """A map refresh sees filesystem changes and leaves user drawings alone."""
+    import diorama.server as server
+    from diorama.codebase.workspace import Workspace
+
+    repo = _sample_repo(tmp_path)
+    workspace = Workspace(repo)
+    first_seed = server.build_codebase_seed(workspace)
+    assert first_seed is not None
+    session = server.build_initial_session("refresh-map", seed=first_seed)
+    user_element = {"id": "user-note", "type": "text", "x": 900, "y": 0, "text": "Keep me"}
+    session["visual_elements"].append(user_element)
+
+    (repo / "app" / "helper.py").unlink()
+    (repo / "app" / "fresh.py").write_text("def fresh():\n    return 2\n")
+    refreshed_seed = server.build_codebase_seed(workspace)
+    assert refreshed_seed is not None
+    server.replace_codebase_map(session, refreshed_seed)
+
+    ids = {element["id"] for element in session["visual_elements"]}
+    assert "user-note" in ids
+    primitives = {
+        element.get("customData", {}).get("primitive")
+        for element in session["visual_elements"]
+        if isinstance(element.get("customData"), dict)
+    }
+    assert any(isinstance(primitive, str) and "fresh-py" in primitive for primitive in primitives)
+    assert not any(isinstance(primitive, str) and "helper-py" in primitive for primitive in primitives)
+
+
 def test_unbound_server_starts_with_empty_board(monkeypatch):
     import diorama.server as server
 

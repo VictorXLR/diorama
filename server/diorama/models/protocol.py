@@ -23,6 +23,20 @@ class UserMessagePayload(BaseModel):
     client_timestamp: Optional[str] = Field(default=None, alias="clientTimestamp")
 
 
+class SceneSyncPayload(BaseModel):
+    """A browser-originated scene change that does not invoke the agent."""
+
+    model_config = ConfigDict(populate_by_name=True)
+    type: Literal["sync_scene"] = "sync_scene"
+    visual_elements: VisualElements = Field(alias="visualElements")
+    files: Optional[Dict[str, CanvasFile]] = Field(default=None, description="Current board assets.")
+    # The scene revision the browser was editing when it scheduled this sync.
+    # It lets the server drop a delayed client snapshot after an agent turn has
+    # produced a newer board.
+    base_scene_version: Optional[int] = Field(default=None, alias="baseSceneVersion", ge=0)
+    session_id: Optional[str] = Field(default=None, alias="sessionId")
+
+
 class RevertTurnPayload(BaseModel):
     """Undo everything one agent turn did to the board."""
 
@@ -54,6 +68,14 @@ class RequestCurrentStatePayload(BaseModel):
     session_id: Optional[str] = Field(default=None, alias="sessionId")
 
 
+class RefreshCodebaseMapPayload(BaseModel):
+    """Request a fresh rendering of the repository currently bound to the server."""
+
+    model_config = ConfigDict(populate_by_name=True)
+    type: Literal["refresh_codebase_map"] = "refresh_codebase_map"
+    session_id: Optional[str] = Field(default=None, alias="sessionId")
+
+
 class ConnectionAckMessage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     type: Literal["connection_ack"] = "connection_ack"
@@ -63,6 +85,7 @@ class ConnectionAckMessage(BaseModel):
     initial_context: Optional[ContextVisualization] = Field(default=None, alias="initialContext")
     initial_messages: Optional[List[ChatMessage]] = Field(default=None, alias="initialMessages")
     visual_elements: Optional[List[Dict[str, Any]]] = Field(default=None, alias="visualElements")
+    scene_version: int = Field(default=0, alias="sceneVersion")
     files: Optional[Dict[str, CanvasFile]] = None
     capabilities: Optional[List[str]] = None
 
@@ -87,6 +110,7 @@ class ContextUpdateMessage(BaseModel):
     type: Literal["context_update"] = "context_update"
     context: Optional[ContextVisualization] = None
     visual_elements: Optional[List[Dict[str, Any]]] = Field(default=None, alias="visualElements")
+    scene_version: int = Field(default=0, alias="sceneVersion")
     files: Optional[Dict[str, CanvasFile]] = Field(default=None, description="New/changed assets only.")
     changed_element_ids: Optional[List[str]] = Field(default=None, alias="changedElementIds")
     turn_id: Optional[str] = Field(default=None, alias="turnId")
@@ -123,11 +147,13 @@ class ErrorMessage(BaseModel):
 
 ClientMessage = Union[
     UserMessagePayload,
+    SceneSyncPayload,
     SelectPresetPayload,
     ResetSessionPayload,
     RevertTurnPayload,
     PingPayload,
     RequestCurrentStatePayload,
+    RefreshCodebaseMapPayload,
 ]
 
 ServerMessage = Union[

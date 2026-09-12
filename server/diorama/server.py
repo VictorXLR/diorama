@@ -31,7 +31,9 @@ from diorama.models.protocol import (
     ContextUpdateMessage,
     ErrorMessage,
     PongMessage,
+    RefreshCodebaseMapPayload,
     RevertTurnPayload,
+    SceneSyncPayload,
     UserMessagePayload,
 )
 from diorama.visual.generator import generate_context_whiteboard_skeletons
@@ -143,12 +145,21 @@ def build_codebase_seed(workspace: Optional[Workspace]) -> Optional[Dict[str, An
 
 codebase_seed: Optional[Dict[str, Any]] = build_codebase_seed(workspace)
 
+
+def refresh_codebase_seed() -> Optional[Dict[str, Any]]:
+    """Re-index the workspace and retain the latest successful map metadata."""
+    global codebase_seed
+    fresh = build_codebase_seed(workspace)
+    if fresh is not None:
+        codebase_seed = fresh
+    return fresh
+
 if store.enabled:
     for _persisted in store.load_all().values():
         sessions[_persisted["session_id"]] = _persisted
 
 
-def build_initial_session(session_id: str) -> Dict[str, Any]:
+def build_initial_session(session_id: str, *, seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Create a session.
 
     With no repository bound the board starts empty and is built entirely from
@@ -162,10 +173,20 @@ def build_initial_session(session_id: str) -> Dict[str, Any]:
         "visual_elements": [],
         "files": {},
         "turns": [],
+        # Physical Excalidraw ids owned by the generated repository map.  Keeping
+        # these separately lets a refresh replace the map without touching a
+        # user's own drawing.
+        "codebase_map_element_ids": [],
+        # Bumped for authoritative scene transitions (a submitted turn and
+        # server-rendered updates). Browser-only syncs use it as a base token
+        # but do not advance it, so several local edits can be coalesced.
+        "scene_version": 0,
     }
-    if codebase_seed is not None:
-        session["visual_elements"] = copy.deepcopy(codebase_seed["visual_elements"])
-        session["messages"].append(build_codebase_welcome(codebase_seed))
+    seed = codebase_seed if seed is None else seed
+    if seed is not None:
+        session["visual_elements"] = copy.deepcopy(seed["visual_elements"])
+        session["codebase_map_element_ids"] = [element["id"] for element in session["visual_elements"]]
+        session["messages"].append(build_codebase_welcome(seed))
     return session
 
 
@@ -191,8 +212,51 @@ def build_codebase_welcome(seed: Dict[str, Any]) -> ChatMessage:
 def get_or_create_session(session_id: Optional[str] = None) -> Dict[str, Any]:
     session_key = session_id or f"sess-{uuid.uuid4().hex[:8]}"
     if session_key not in sessions:
-        sessions[session_key] = build_initial_session(session_key)
-    return sessions[session_key]
+        # Rebuild for each new board: code changes made while the server is
+        # running must be visible without requiring a process restart.
+        sessions[session_key] = build_initial_session(session_key, seed=refresh_codebase_seed())
+    session = sessions[session_key]
+    # Sessions persisted by earlier versions did not carry a revision.
+    session.setdefault("scene_version", 0)
+    return session
+
+
+def scene_version(session_data: Dict[str, Any]) -> int:
+    """Return a non-negative scene revision for a session, tolerating old data."""
+    value = session_data.get("scene_version", 0)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def advance_scene_version(session_data: Dict[str, Any]) -> int:
+    """Mark an authoritative change that invalidates delayed browser snapshots."""
+    next_version = scene_version(session_data) + 1
+    session_data["scene_version"] = next_version
+    return next_version
+
+
+def commit_scene(session_data: Dict[str, Any], visual_elements: List[Dict[str, Any]]) -> int:
+    """Store a complete authoritative scene and advance its revision."""
+    session_data["visual_elements"] = visual_elements
+    retain_present_codebase_map_ids(session_data)
+    return advance_scene_version(session_data)
+
+
+def replace_codebase_map(session_data: Dict[str, Any], seed: Dict[str, Any]) -> None:
+    """Replace only the generated map, preserving user-created canvas elements."""
+    prior_ids = set(session_data.get("codebase_map_element_ids") or [])
+    user_elements = [element for element in session_data["visual_elements"] if element["id"] not in prior_ids]
+    codebase_elements = copy.deepcopy(seed["visual_elements"])
+    session_data["visual_elements"] = [*user_elements, *codebase_elements]
+    session_data["codebase_map_element_ids"] = [element["id"] for element in codebase_elements]
+    advance_scene_version(session_data)
+
+
+def retain_present_codebase_map_ids(session_data: Dict[str, Any]) -> None:
+    """Drop ownership for map elements the user or agent has removed."""
+    present = {element["id"] for element in session_data["visual_elements"]}
+    session_data["codebase_map_element_ids"] = [
+        element_id for element_id in session_data.get("codebase_map_element_ids", []) if element_id in present
+    ]
 
 
 def persist_session(session_data: Dict[str, Any]) -> None:
@@ -210,6 +274,7 @@ def remember_turn(session_data: Dict[str, Any], turn_id: str) -> None:
             "visual_elements": copy.deepcopy(session_data["visual_elements"]),
             "files": dict(session_data.get("files", {})),
             "file_edits": {},
+            "codebase_map_element_ids": list(session_data.get("codebase_map_element_ids", [])),
         }
     )
     del turns[:-MAX_TURN_SNAPSHOTS]
@@ -276,6 +341,7 @@ async def send_connection_ack(websocket: WebSocket, session_data: Dict[str, Any]
         initialContext=session_data["context"],
         initialMessages=session_data["messages"],
         visualElements=session_data["visual_elements"],
+        sceneVersion=scene_version(session_data),
         files=session_data.get("files") or None,
         capabilities=CAPABILITIES,
     )
@@ -292,10 +358,12 @@ async def send_context_update(
     changed_element_ids: Optional[list[str]] = None,
     turn_id: Optional[str] = None,
     partial: bool = False,
+    scene_version: int = 0,
 ) -> None:
     update = ContextUpdateMessage(
         context=context,
         visualElements=visual_elements,
+        sceneVersion=scene_version,
         files=files or None,
         changedElementIds=changed_element_ids,
         turnId=turn_id,
@@ -397,6 +465,7 @@ async def get_context(session_id: Optional[str] = None) -> Dict[str, Any]:
     return {
         "context": context.model_dump(by_alias=True) if context is not None else None,
         "visualElements": session_data["visual_elements"],
+        "sceneVersion": scene_version(session_data),
         "files": {k: v.model_dump(by_alias=True) for k, v in (session_data.get("files") or {}).items()},
     }
 
@@ -463,6 +532,81 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                     session_data["visual_elements"],
                     "Current synchronized visual context." if has_context else "No visual context yet.",
                     files=session_data.get("files"),
+                    scene_version=scene_version(session_data),
+                )
+                continue
+
+            if msg_type == "sync_scene":
+                try:
+                    scene_sync = SceneSyncPayload.model_validate(data)
+                except ValidationError as exc:
+                    await websocket.send_text(
+                        ErrorMessage(code="INVALID_MESSAGE", message="Invalid whiteboard scene.", details=str(exc))
+                        .model_dump_json(by_alias=True, exclude_none=True)
+                    )
+                    continue
+                # A direct canvas edit should survive reconnects even when the
+                # user has not yet sent a chat message.  ``files`` is a full
+                # snapshot when supplied, so removals are persisted too.
+                if (
+                    scene_sync.base_scene_version is not None
+                    and scene_sync.base_scene_version != scene_version(session_data)
+                ):
+                    # The WebSocket handler processes an agent turn before it
+                    # can read later client messages.  A debounced sync from
+                    # before that turn would otherwise replace the fresh agent
+                    # board after the final context_update was sent.
+                    logger.info(
+                        "Ignored stale scene sync for %s (client=%s, server=%s)",
+                        session_id,
+                        scene_sync.base_scene_version,
+                        scene_version(session_data),
+                    )
+                    continue
+                session_data["visual_elements"] = scene_sync.visual_elements
+                retain_present_codebase_map_ids(session_data)
+                if scene_sync.files is not None:
+                    session_data["files"] = scene_sync.files
+                persist_session(session_data)
+                continue
+
+            if msg_type == "refresh_codebase_map":
+                try:
+                    RefreshCodebaseMapPayload.model_validate(data)
+                except ValidationError as exc:
+                    await websocket.send_text(
+                        ErrorMessage(code="INVALID_MESSAGE", message="Invalid codebase-map refresh request.", details=str(exc))
+                        .model_dump_json(by_alias=True, exclude_none=True)
+                    )
+                    continue
+                seed = refresh_codebase_seed()
+                if seed is None:
+                    await websocket.send_text(
+                        ErrorMessage(
+                            code="CODEBASE_UNAVAILABLE",
+                            message="No readable workspace is bound, so there is no codebase map to refresh.",
+                        ).model_dump_json(by_alias=True, exclude_none=True)
+                    )
+                    continue
+                replace_codebase_map(session_data, seed)
+                summary = f"Refreshed the codebase map from {seed['indexedFiles']} source files."
+                persist_session(session_data)
+                await send_context_update(
+                    websocket,
+                    session_data["context"],
+                    session_data["visual_elements"],
+                    summary,
+                    changed_element_ids=list(session_data["codebase_map_element_ids"]),
+                    scene_version=scene_version(session_data),
+                )
+                await send_agent_message(
+                    websocket,
+                    session_data,
+                    content=summary,
+                    summary=summary,
+                    element_count=len(session_data["codebase_map_element_ids"]),
+                    suggestions=list(CODEBASE_SUGGESTIONS),
+                    changed_element_ids=list(session_data["codebase_map_element_ids"]),
                 )
                 continue
 
@@ -489,6 +633,9 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 del turns[index:]
                 session_data["visual_elements"] = copy.deepcopy(snapshot["visual_elements"])
                 session_data["files"] = dict(snapshot["files"])
+                session_data["codebase_map_element_ids"] = list(snapshot.get("codebase_map_element_ids", []))
+                retain_present_codebase_map_ids(session_data)
+                advance_scene_version(session_data)
                 restored = restore_files(session_data, index)
                 summary = "Reverted the board to before that change."
                 if restored:
@@ -497,6 +644,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 await send_context_update(
                     websocket, session_data["context"], session_data["visual_elements"], summary,
                     files=session_data["files"], turn_id=revert.turn_id,
+                    scene_version=scene_version(session_data),
                 )
                 await send_agent_message(
                     websocket, session_data, content=summary, summary=summary,
@@ -505,7 +653,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 continue
 
             if msg_type == "reset_session":
-                session_data = build_initial_session(session_id)
+                session_data = build_initial_session(session_id, seed=refresh_codebase_seed())
                 sessions[session_id] = session_data
                 persist_session(session_data)
                 await send_connection_ack(websocket, session_data, "Session reset. Describe something to start a new visual context.")
@@ -533,7 +681,11 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 visual_elements = generate_context_whiteboard_skeletons(context)
                 session_data["context"] = context
                 session_data["visual_elements"] = visual_elements
-                await send_context_update(websocket, context, visual_elements, summary)
+                session_data["codebase_map_element_ids"] = []
+                advance_scene_version(session_data)
+                await send_context_update(
+                    websocket, context, visual_elements, summary, scene_version=scene_version(session_data)
+                )
                 await send_agent_message(
                     websocket,
                     session_data,
@@ -577,7 +729,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 continue
 
             if payload.visual_elements is not None:
-                session_data["visual_elements"] = payload.visual_elements
+                commit_scene(session_data, payload.visual_elements)
             if payload.files:
                 session_data.setdefault("files", {}).update(payload.files)
 
@@ -620,7 +772,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                         )
                     elif isinstance(event, PatchEvent):
                         # Stream intermediate progress; the session is committed so a later failure keeps this work.
-                        session_data["visual_elements"] = event.visual_elements
+                        commit_scene(session_data, event.visual_elements)
                         session_data.setdefault("files", {}).update(event.files)
                         await send_context_update(
                             websocket,
@@ -631,33 +783,50 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                             changed_element_ids=event.changed_element_ids,
                             turn_id=turn_id,
                             partial=True,
+                            scene_version=scene_version(session_data),
                         )
                     elif isinstance(event, ResponseEvent):
                         session_data["context"] = event.context
-                        session_data["visual_elements"] = event.visual_elements
+                        commit_scene(session_data, event.visual_elements)
                         session_data.setdefault("files", {}).update(event.files)
                         if event.file_changes:
                             record_turn_file_edits(session_data, turn_id, event.file_changes)
+                        visual_elements = event.visual_elements
+                        changed_ids = list(event.changed_element_ids)
+                        visual_summary = event.visual_summary
+                        # Code edits made through the website used to leave the
+                        # opening repository map stale until a server restart.
+                        # Refresh only a map this session owns, so unrelated
+                        # user diagrams remain untouched.
+                        if event.file_changes and session_data.get("codebase_map_element_ids"):
+                            seed = refresh_codebase_seed()
+                            if seed is not None:
+                                replace_codebase_map(session_data, seed)
+                                visual_elements = session_data["visual_elements"]
+                                changed_ids = list(dict.fromkeys([*changed_ids, *session_data["codebase_map_element_ids"]]))
+                                map_summary = f"Refreshed the codebase map from {seed['indexedFiles']} source files."
+                                visual_summary = "; ".join(part for part in (visual_summary, map_summary) if part)
                         persist_session(session_data)
                         await send_context_update(
                             websocket,
                             event.context,
-                            event.visual_elements,
-                            event.visual_summary,
+                            visual_elements,
+                            visual_summary,
                             files=event.files,
-                            changed_element_ids=event.changed_element_ids,
+                            changed_element_ids=changed_ids,
                             turn_id=turn_id,
+                            scene_version=scene_version(session_data),
                         )
                         await send_agent_message(
                             websocket,
                             session_data,
                             content=event.reply_text,
-                            summary=event.visual_summary,
+                            summary=visual_summary,
                             element_count=event.elements_added,
                             suggestions=event.suggestions,
                             questions=event.questions,
-                            turn_id=turn_id if event.changed_element_ids or event.file_changes else None,
-                            changed_element_ids=event.changed_element_ids or None,
+                            turn_id=turn_id if changed_ids or event.file_changes else None,
+                            changed_element_ids=changed_ids or None,
                             file_changes=event.file_changes or None,
                         )
                         await send_status(websocket, "idle", "Ready")
