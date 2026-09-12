@@ -89,6 +89,42 @@ def completion(upserts=(), deletes=()):
     })}}]})
 
 
+def native_tool_completion(*calls):
+    """Build an OpenAI-style native tool-calling response."""
+    return httpx.Response(200, json={"choices": [{
+        "finish_reason": "tool_calls",
+        "message": {
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                }
+                for call_id, name, arguments in calls
+            ],
+        },
+    }]})
+
+
+def legacy_context_completion():
+    return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+        "reply": "Mapped the checkout flow.",
+        "summary": "Rendered the checkout flow.",
+        "suggestions": ["Add failure handling"],
+        "context": {
+            "id": "ctx-checkout", "title": "Checkout flow", "summary": "A customer completes a purchase.",
+            "diagramType": "workflow", "groups": [{"id": "client", "title": "Customer"}],
+            "nodes": [
+                {"id": "cart", "label": "Cart", "category": "client", "groupId": "client", "description": "Items ready to buy"},
+                {"id": "payment", "label": "Payment", "category": "service", "description": "Authorizes the charge"},
+            ],
+            "connections": [{"id": "cart-payment", "fromNode": "cart", "toNode": "payment", "label": "Submit"}],
+            "insights": [], "tags": ["checkout"],
+        },
+    })}}]})
+
+
 def receive_turn(ws):
     received = []
     # Bound unexpectedly verbose streams; receive_json still waits for each message.
@@ -129,6 +165,159 @@ def test_websocket_ping_pong():
         ws.send_json({"type": "ping"})
 
         assert ws.receive_json() == {"type": "pong"}
+
+
+def test_websocket_sync_scene_persists_browser_edits_without_an_agent_turn(native_scene):
+    """Regression: the server only learned about canvas edits with the next chat message."""
+    client = TestClient(app)
+    with client.websocket_connect("/ws/browser-scene-sync") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "sync_scene", "visualElements": native_scene, "files": {}})
+        ws.send_json({"type": "request_current_state"})
+        state = ws.receive_json()
+
+    assert state["type"] == "context_update"
+    assert state["visualElements"] == native_scene
+
+
+def test_websocket_drops_stale_scene_sync_queued_during_an_agent_turn(model_http):
+    """A delayed browser snapshot must not erase the agent's fresh whiteboard."""
+    responses, _ = model_http
+    responses.append(completion([
+        {"id": "agent-route", "type": "rectangle", "x": 0, "y": 0, "width": 120, "height": 60},
+    ]))
+
+    with TestClient(app).websocket_connect("/ws/stale-scene-sync") as ws:
+        ack = ws.receive_json()
+        assert ack["sceneVersion"] == 0
+        ws.send_json({
+            "type": "user_message",
+            "content": "Draw a route card.",
+            "visualElements": [],
+        })
+        # The real browser can queue this while the server is awaiting the
+        # model. It is read only after the final agent event otherwise.
+        ws.send_json({
+            "type": "sync_scene",
+            "visualElements": [],
+            "baseSceneVersion": ack["sceneVersion"],
+        })
+        received = receive_turn(ws)
+        update = context_update(received)
+        assert [element["id"] for element in update["visualElements"]] == ["agent-route"]
+        assert update["sceneVersion"] > ack["sceneVersion"]
+
+        ws.send_json({"type": "request_current_state"})
+        state = ws.receive_json()
+
+    assert [element["id"] for element in state["visualElements"]] == ["agent-route"]
+    assert state["sceneVersion"] == update["sceneVersion"]
+
+
+def test_websocket_renders_legacy_context_descriptions_as_excalidraw(model_http):
+    """Regression: descriptive user queries stopped producing a visual context."""
+    responses, _ = model_http
+    responses.append(legacy_context_completion())
+
+    with TestClient(app).websocket_connect("/ws/legacy-context") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "user_message", "content": "Describe the checkout flow"})
+        received = receive_turn(ws)
+
+    update = context_update(received)
+    assert update["context"]["id"] == "ctx-checkout"
+    assert update["context"]["title"] == "Checkout flow"
+    assert update["visualElements"]
+    assert all(element["id"].startswith("ctx-checkout-preset-") for element in update["visualElements"])
+
+
+def test_websocket_reprompts_prose_only_trip_reply_until_it_updates_canvas(model_http):
+    """A useful itinerary must not be allowed to leave a route request's board stale."""
+    responses, requests = model_http
+    responses.extend([
+        httpx.Response(200, json={"choices": [{"message": {"content": "Meet at Times Square, then visit MoMA."}}]}),
+        completion([{"id": "trip-note", "type": "rectangle", "x": 0, "y": 0, "width": 100, "height": 50}]),
+    ])
+
+    with TestClient(app).websocket_connect("/ws/prose-trip-retry") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "type": "user_message",
+            "content": "Plan a route from Flushing and Bushwick to Times Square and MoMA.",
+        })
+        received = receive_turn(ws)
+
+    assert [element["id"] for element in context_update(received)["visualElements"]] == ["trip-note"]
+    assert len(requests) == 2
+    assert requests[1]["messages"][-1]["content"].startswith("Do not answer in prose only")
+
+
+def test_websocket_rejects_json_final_without_a_visual_update(model_http):
+    """JSON fallback finals obey the same visual requirement as native finish calls."""
+    responses, requests = model_http
+    responses.extend([
+        httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+            "final": {"reply": "Here is your itinerary.", "summary": "Planned the trip."},
+        })}}]}),
+        completion([
+            {"id": "json-trip-note", "type": "rectangle", "x": 0, "y": 0, "width": 100, "height": 50},
+        ]),
+    ])
+
+    with TestClient(app).websocket_connect("/ws/json-final-retry") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "type": "user_message",
+            "content": "Show a map-based Manhattan trip itinerary.",
+        })
+        received = receive_turn(ws)
+
+    assert [element["id"] for element in context_update(received)["visualElements"]] == ["json-trip-note"]
+    assert len(requests) == 2
+    assert requests[1]["messages"][-1]["content"].startswith("Do not finish a visual request")
+
+
+def test_websocket_rejects_native_finish_until_a_visual_request_changes_the_board(model_http):
+    """A native `finish` call cannot bypass the visual-update requirement."""
+    responses, requests = model_http
+    responses.extend([
+        native_tool_completion(("finish-early", "finish", {
+            "reply": "Meet at Times Square, then visit MoMA.",
+            "summary": "Planned the trip.",
+        })),
+        native_tool_completion(("draw-trip", "edit_elements", {
+            "upsertElements": [
+                {"id": "trip-note", "type": "rectangle", "x": 0, "y": 0, "width": 120, "height": 60},
+            ],
+        })),
+        native_tool_completion(("finish-final", "finish", {
+            "reply": "I added the route plan to the board.",
+            "summary": "Drew the Manhattan trip plan.",
+        })),
+    ])
+
+    with TestClient(app).websocket_connect("/ws/native-finish-retry") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "type": "user_message",
+            "content": "Plan a route from Flushing and Bushwick to Times Square and MoMA.",
+        })
+        received = receive_turn(ws)
+
+    assert [element["id"] for element in context_update(received)["visualElements"]] == ["trip-note"]
+    assert len(requests) == 3
+    retry_messages = requests[1]["messages"]
+    assert retry_messages[-2] == {
+        "role": "tool",
+        "tool_call_id": "finish-early",
+        "name": "finish",
+        "content": json.dumps({
+            "error": "finish was rejected because this visual request has not changed the Excalidraw board. "
+            "Make a visible canvas update before calling finish.",
+        }),
+    }
+    assert retry_messages[-1]["role"] == "user"
+    assert retry_messages[-1]["content"].startswith("The previous finish was rejected")
 
 
 def test_websocket_user_message_edits_full_native_scene(model_http, native_scene):
@@ -469,4 +658,3 @@ def test_websocket_model_failures_do_not_partially_mutate_scene(
     assert state.json()["visualElements"] == native_scene
     assert len(requests) == 2
     assert model_prompt(requests[-1])["visualElements"] == native_scene
-

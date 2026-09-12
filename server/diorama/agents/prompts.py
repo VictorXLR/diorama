@@ -12,7 +12,7 @@ from diorama.visual.primitives import primitive_schema_summary
 from diorama.visual.theme import GRID
 
 SYSTEM_PROMPT = """You are Diorama, an agent that builds on a shared Excalidraw whiteboard while chatting with the user.
-You work through tools. Each turn: understand the request, inspect the board if needed, fetch real assets, draw in a few well-composed steps, then call `finish` (or `ask_user` if a decision materially changes the result).
+You work through tools. Each turn: understand the request, inspect the board if needed, fetch real assets, draw in a few well-composed steps, then call `finish` (or `ask_user` if a decision materially changes the result). Do not give a prose-only answer to a visual request: the board must change before you finish.
 
 ## How to draw well
 - Compose with primitives via `draw` (frame, heading, card, note, pin, route, timeline, legend, image, embed, code). The server handles typography, padding, sizing and colours and returns each primitive's final box — use those boxes to place the next things. Do not hand-compute text heights.
@@ -59,21 +59,34 @@ A repository is bound to this session and you can read and modify it.
 """
 
 
-def build_system_prompt(context: AgentContext, registry: ToolRegistry, *, native_tools: bool) -> str:
+def build_system_prompt(
+    context: AgentContext,
+    registry: ToolRegistry,
+    *,
+    native_tools: bool,
+    include_code_instructions: bool = False,
+) -> str:
     prompt = SYSTEM_PROMPT.format(
         grid=GRID,
         gap=GRID * 2,
         theme=context.theme,
         primitives=primitive_schema_summary(),
     )
-    if context.workspace is not None:
+    if include_code_instructions:
         prompt += CODE_PROMPT
     if not native_tools:
         prompt += "\n" + JSON_FALLBACK_INSTRUCTIONS + registry.prompt_catalog()
     return prompt
 
 
-def build_user_prompt(input_text: str, context: AgentContext, *, full_scene: bool) -> str:
+def build_user_prompt(
+    input_text: str,
+    context: AgentContext,
+    *,
+    full_scene: bool,
+    include_workspace_context: bool = True,
+    scene_overview_limit: int | None = None,
+) -> str:
     history: List[Dict[str, Any]] = []
     for message in context.conversation_history[-12:]:
         sender = message.get("sender")
@@ -87,7 +100,7 @@ def build_user_prompt(input_text: str, context: AgentContext, *, full_scene: boo
         "theme": context.theme,
         "selectedElementIds": context.selected_element_ids,
         "viewport": context.viewport,
-        "workspaceContext": context.workspace_context or {},
+        "workspaceContext": (context.workspace_context or {}) if include_workspace_context else {},
         "availableAssetIds": sorted(context.files.keys()),
     }
     # Small scenes go in verbatim so simple edits need no extra round-trip; large ones are summarised
@@ -95,5 +108,5 @@ def build_user_prompt(input_text: str, context: AgentContext, *, full_scene: boo
     if full_scene:
         payload["visualElements"] = context.visual_elements
     else:
-        payload["sceneOverview"] = scene_overview(context.visual_elements)
+        payload["sceneOverview"] = scene_overview(context.visual_elements, max_primitives=scene_overview_limit)
     return json.dumps(payload, ensure_ascii=False)

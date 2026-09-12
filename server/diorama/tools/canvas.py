@@ -85,7 +85,14 @@ def _describe_element(element: Dict[str, Any], include_text: bool) -> Dict[str, 
     return info
 
 
-def scene_overview(scene: List[Dict[str, Any]], *, ids: Optional[List[str]] = None, include_text: bool = True) -> Dict[str, Any]:
+def scene_overview(
+    scene: List[Dict[str, Any]],
+    *,
+    ids: Optional[List[str]] = None,
+    include_text: bool = True,
+    max_primitives: Optional[int] = None,
+    max_raw_elements: Optional[int] = None,
+) -> Dict[str, Any]:
     """Compact scene description: primitives collapse to their anchor, raw elements are listed individually."""
     wanted = set(ids or [])
     primitives: List[Dict[str, Any]] = []
@@ -103,7 +110,15 @@ def scene_overview(scene: List[Dict[str, Any]], *, ids: Optional[List[str]] = No
                 texts.setdefault(primitive_id, []).append(element["text"][:80])
         else:
             raw.append(_describe_element(element, include_text))
-    for item in primitives:
+    if max_primitives is not None and max_primitives >= 0:
+        visible_primitives = primitives[:max_primitives]
+    else:
+        visible_primitives = primitives
+    if max_raw_elements is not None and max_raw_elements >= 0:
+        visible_raw = raw[:max_raw_elements]
+    else:
+        visible_raw = raw
+    for item in visible_primitives:
         if item.get("primitive") in texts:
             item["texts"] = texts[item["primitive"]][:6]
     xs = [a.x for a in (anchor_from_element(e) for e in scene) if a]
@@ -117,7 +132,18 @@ def scene_overview(scene: List[Dict[str, Any]], *, ids: Optional[List[str]] = No
             round(max(a.x + a.width for a in anchors) - min(xs)),
             round(max(a.y + a.height for a in anchors) - min(ys)),
         ]
-    return {"elementCount": len(scene), "bounds": bounds, "primitives": primitives, "rawElements": raw}
+    overview = {
+        "elementCount": len(scene),
+        "bounds": bounds,
+        "primitives": visible_primitives,
+        "rawElements": visible_raw,
+    }
+    if len(visible_primitives) != len(primitives) or len(visible_raw) != len(raw):
+        overview["truncated"] = {
+            "primitives": len(primitives) - len(visible_primitives),
+            "rawElements": len(raw) - len(visible_raw),
+        }
+    return overview
 
 
 async def _draw(args: DrawArgs, context: ToolContext) -> ToolResult:
