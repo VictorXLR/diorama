@@ -3,7 +3,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +12,10 @@ from pydantic import ValidationError
 from diorama.agents.base import AgentContext, PatchEvent, ResponseEvent, StatusEvent, ThoughtEvent
 from diorama.agents.context_agent import ContextAgent
 from diorama.agents.openrouter import OpenRouterContextModel
+from diorama.codebase.workspace import Workspace, WorkspaceError
+from diorama.config import Settings, get_settings
 from diorama.data.default_contexts import DEFAULT_ARCHITECTURE_CONTEXT, MICROSERVICES_CONTEXT
+from diorama.persistence import SessionStore
 from diorama.models.canvas import CanvasFile
 from diorama.models.chat import ChatMessage, VisualUpdate
 from diorama.models.context import ContextVisualization
@@ -32,6 +35,8 @@ from diorama.visual.generator import generate_context_whiteboard_skeletons
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("diorama.server")
 
+settings: Settings = get_settings()
+
 app = FastAPI(
     title="Diorama AI Harness Server",
     description="Backend server for real-time visual context conversations",
@@ -40,13 +45,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.cors_origins,
+    allow_credentials=settings.allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 sessions: Dict[str, Dict[str, Any]] = {}
+store = SessionStore(settings.database_path)
 context_model = OpenRouterContextModel()
 agent = ContextAgent(model=context_model)
 MAX_TURN_SNAPSHOTS = 20
@@ -59,7 +65,33 @@ CAPABILITIES = [
     "streamed_patches",
     "revert_turn",
     "selection_context",
+    "codebase",
+    "code_tools",
 ]
+
+
+def build_workspace(settings: Settings) -> Optional[Workspace]:
+    """Open the configured repository for the code tools, or None if unbound."""
+    if settings.workspace_root is None:
+        return None
+    try:
+        return Workspace(
+            settings.workspace_root,
+            max_read_bytes=settings.max_read_bytes,
+            max_output_bytes=settings.max_output_bytes,
+            exec_timeout=settings.exec_timeout,
+            allow_exec=settings.allow_exec,
+        )
+    except WorkspaceError as exc:
+        logger.warning("Code tools disabled: %s", exc)
+        return None
+
+
+workspace: Optional[Workspace] = build_workspace(settings)
+
+if store.enabled:
+    for _persisted in store.load_all().values():
+        sessions[_persisted["session_id"]] = _persisted
 
 
 def build_initial_session(session_id: str) -> Dict[str, Any]:
@@ -81,17 +113,62 @@ def get_or_create_session(session_id: Optional[str] = None) -> Dict[str, Any]:
     return sessions[session_key]
 
 
+def persist_session(session_data: Dict[str, Any]) -> None:
+    """Write a session through to storage (no-op when persistence is disabled)."""
+    if store.enabled:
+        store.save(session_data)
+
+
 def remember_turn(session_data: Dict[str, Any], turn_id: str) -> None:
-    """Snapshot the board so one agent turn can be reverted later."""
+    """Snapshot the board and files so one agent turn can be reverted later."""
     turns = session_data.setdefault("turns", [])
     turns.append(
         {
             "turn_id": turn_id,
             "visual_elements": copy.deepcopy(session_data["visual_elements"]),
             "files": dict(session_data.get("files", {})),
+            "file_edits": {},
         }
     )
     del turns[:-MAX_TURN_SNAPSHOTS]
+
+
+def record_turn_file_edits(session_data: Dict[str, Any], turn_id: str, changes: List[Dict[str, Any]]) -> None:
+    """Remember the earliest pre-edit content of every file touched this turn."""
+    turn = next((t for t in session_data.get("turns", []) if t["turn_id"] == turn_id), None)
+    if turn is None:
+        return
+    edits: Dict[str, str] = turn.setdefault("file_edits", {})
+    for change in changes:
+        path = change.get("path")
+        if not path or path in edits:
+            continue
+        before = change.get("before")
+        edits[path] = before if isinstance(before, str) else ""
+
+
+def restore_files(session_data: Dict[str, Any], from_index: int) -> List[str]:
+    """Revert workspace files touched by turns at/after ``from_index``.
+
+    Restores each path to the content it had before the earliest discarded turn.
+    Returns the list of paths restored.
+    """
+    if workspace is None:
+        return []
+    turns = session_data.get("turns", [])
+    first_before: Dict[str, str] = {}
+    for turn in turns[from_index:]:
+        for path, before in (turn.get("file_edits") or {}).items():
+            if path not in first_before:
+                first_before[path] = before
+    restored: List[str] = []
+    for path, before in first_before.items():
+        try:
+            workspace.write_file(path, before)
+            restored.append(path)
+        except WorkspaceError as exc:
+            logger.warning("Could not restore %s: %s", path, exc)
+    return restored
 
 
 async def send_connection_ack(websocket: WebSocket, session_data: Dict[str, Any], message: str) -> None:
@@ -176,6 +253,10 @@ async def health_check() -> Dict[str, Any]:
         "model_provider": context_model.provider_name if context_model.is_configured else "unconfigured",
         "model": context_model.model if context_model.is_configured else None,
         "tools": [tool.name for tool in agent.registry],
+        "codeTools": [tool.name for tool in agent.code_registry],
+        "workspace": str(workspace.root) if workspace is not None else None,
+        "execEnabled": bool(workspace and workspace.allow_exec),
+        "persistence": store.enabled,
         "capabilities": CAPABILITIES,
     }
 
@@ -275,11 +356,15 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                     )
                     continue
                 snapshot = turns[index]
-                # Reverting a turn also discards everything drawn after it.
+                # Reverting a turn also discards everything drawn or edited after it.
                 del turns[index:]
                 session_data["visual_elements"] = copy.deepcopy(snapshot["visual_elements"])
                 session_data["files"] = dict(snapshot["files"])
+                restored = restore_files(session_data, index)
                 summary = "Reverted the board to before that change."
+                if restored:
+                    summary += f" Restored {len(restored)} file{'s' if len(restored) != 1 else ''} in the workspace."
+                persist_session(session_data)
                 await send_context_update(
                     websocket, session_data["context"], session_data["visual_elements"], summary,
                     files=session_data["files"], turn_id=revert.turn_id,
@@ -293,6 +378,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
             if msg_type == "reset_session":
                 session_data = build_initial_session(session_id)
                 sessions[session_id] = session_data
+                persist_session(session_data)
                 await send_connection_ack(websocket, session_data, "Session reset. Describe something to start a new visual context.")
                 continue
 
@@ -384,6 +470,7 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                 selectedElementIds=payload.selected_element_ids,
                 files=session_data.get("files", {}),
                 viewport=payload.viewport,
+                workspace=workspace,
             )
 
             try:
@@ -419,6 +506,9 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
                         session_data["context"] = event.context
                         session_data["visual_elements"] = event.visual_elements
                         session_data.setdefault("files", {}).update(event.files)
+                        if event.file_changes:
+                            record_turn_file_edits(session_data, turn_id, event.file_changes)
+                        persist_session(session_data)
                         await send_context_update(
                             websocket,
                             event.context,
@@ -468,4 +558,9 @@ async def websocket_endpoint(websocket: WebSocket, requested_session_id: Optiona
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("diorama.server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "diorama.server:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.reload,
+    )

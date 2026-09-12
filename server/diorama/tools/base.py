@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Type
 
 from pydantic import BaseModel, ValidationError
 
+from diorama.codebase.workspace import Workspace
 from diorama.models.canvas import CanvasFile, CanvasPatch
 
 
@@ -33,10 +34,23 @@ class ToolContext:
     selected_element_ids: List[str] = field(default_factory=list)
     viewport: Optional[Dict[str, float]] = None
     workspace_context: Dict[str, Any] = field(default_factory=dict)
+    workspace: Optional[Workspace] = None
+    """Confined view of the target repository, or None when no repo is bound."""
+
+    file_changes: List[Dict[str, Any]] = field(default_factory=list)
+    """Files touched this turn, for diffing and rollback: {path, before, after, diff}."""
 
     @property
     def known_file_ids(self) -> set[str]:
         return set(self.files.keys())
+
+    def require_workspace(self) -> Workspace:
+        if self.workspace is None:
+            raise ToolError(
+                "No repository is bound to this session. Start the server with a workspace "
+                "root (DIORAMA_WORKSPACE or `diorama dev <path>`) to use code tools."
+            )
+        return self.workspace
 
 
 @dataclass

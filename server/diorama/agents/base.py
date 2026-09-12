@@ -13,13 +13,14 @@ class AgentContext(BaseModel):
     conversation history, and session metadata.
     Designed to generalize beyond trips to code workspaces, systems, and architectures.
     """
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
     session_id: str = Field(alias="sessionId")
     current_context: Optional[ContextVisualization] = Field(default=None, alias="currentContext")
     visual_elements: VisualElements = Field(default_factory=list, alias="visualElements")
     conversation_history: List[Dict[str, Any]] = Field(default_factory=list, alias="conversationHistory")
     workspace_context: Optional[Dict[str, Any]] = Field(default_factory=dict, alias="workspaceContext")
+    workspace: Optional[Any] = Field(default=None, exclude=True, description="Confined repository view for code tools.")
     theme: Literal["light", "dark"] = "light"
     selected_element_ids: List[str] = Field(default_factory=list, alias="selectedElementIds")
     files: Dict[str, CanvasFile] = Field(default_factory=dict, description="Binary assets already on the board.")
@@ -62,6 +63,9 @@ class ResponseEvent(BaseModel):
     elements_added: int = 0
     suggestions: List[str] = Field(default_factory=list)
     questions: List[str] = Field(default_factory=list, description="Clarifying questions shown as quick replies.")
+    file_changes: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Workspace files created/edited this turn, with unified diffs."
+    )
 
 
 AgentLifecycleEvent = Union[StatusEvent, ThoughtEvent, PatchEvent, ResponseEvent]

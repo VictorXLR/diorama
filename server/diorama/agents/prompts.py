@@ -47,6 +47,17 @@ Tool results arrive in the next user message as {"toolResults": [...]}. Availabl
 
 """
 
+CODE_PROMPT = """
+## Working with the codebase
+A repository is bound to this session and you can read and modify it.
+- Understand before editing: use `list_dir`, `search_code`, `read_file`, and `index_codebase` to locate the relevant files and symbols.
+- Make surgical changes with `edit_file` (exact `oldString` -> `newString`, with enough context to be unique). Use `write_file` only for brand-new files or deliberate full rewrites.
+- Verify with `run_command` (the repo's own build/test/lint commands). Read stdout/stderr and exit codes; if something fails, fix it and run again.
+- Draw the structure on the board with `visualize_codebase` when the user wants to *see* the codebase.
+- Never invent file contents and never claim a command passed unless its output shows it. Keep edits minimal, preserve existing style, and do not touch files the user did not ask about.
+- Every file you change is reported back with a diff and can be reverted by the user, so be precise.
+"""
+
 
 def build_system_prompt(context: AgentContext, registry: ToolRegistry, *, native_tools: bool) -> str:
     prompt = SYSTEM_PROMPT.format(
@@ -55,6 +66,8 @@ def build_system_prompt(context: AgentContext, registry: ToolRegistry, *, native
         theme=context.theme,
         primitives=primitive_schema_summary(),
     )
+    if context.workspace is not None:
+        prompt += CODE_PROMPT
     if not native_tools:
         prompt += "\n" + JSON_FALLBACK_INSTRUCTIONS + registry.prompt_catalog()
     return prompt

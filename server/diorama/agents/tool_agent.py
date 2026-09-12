@@ -54,7 +54,8 @@ class ToolLoopAgent(BaseAgent):
             description="Builds and edits the shared Excalidraw board through composable tools.",
         )
         self.model = model or OpenRouterContextModel()
-        self.registry = registry or default_registry()
+        self.registry = registry or default_registry(include_code=False)
+        self.code_registry = registry or default_registry(include_code=True)
         self.max_steps = max_steps
 
     # ------------------------------------------------------------------ main loop
@@ -79,15 +80,17 @@ class ToolLoopAgent(BaseAgent):
             selected_element_ids=list(context.selected_element_ids),
             viewport=context.viewport,
             workspace_context=dict(context.workspace_context or {}),
+            workspace=context.workspace,
         )
         original_scene = context.visual_elements
         native_tools = self.model.native_tools
+        registry = self.code_registry if context.workspace is not None else self.registry
         full_scene = len(context.visual_elements) <= FULL_SCENE_ELEMENT_LIMIT
         messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": build_system_prompt(context, self.registry, native_tools=native_tools)},
+            {"role": "system", "content": build_system_prompt(context, registry, native_tools=native_tools)},
             {"role": "user", "content": build_user_prompt(input_text, context, full_scene=full_scene)},
         ]
-        tool_schemas = self.registry.schemas()
+        tool_schemas = registry.schemas()
         touched: List[str] = []
         new_files: Dict[str, CanvasFile] = {}
         summaries: List[str] = []
@@ -139,7 +142,14 @@ class ToolLoopAgent(BaseAgent):
                 )
                 yield StatusEvent(status="calling_tool", stage_description=f"Running {call.name}...")
 
-                result, error = await self._run_tool(call, tool_context)
+                files_before = len(tool_context.file_changes)
+                result, error = await self._run_tool(call, tool_context, registry)
+                for change in tool_context.file_changes[files_before:]:
+                    yield ThoughtEvent(
+                        thought=f"Edited {change['path']}",
+                        tool="file_edit",
+                        arguments={"path": change["path"], "diff": (change.get("diff") or "")[:1500]},
+                    )
                 if result is not None and result.patch is not None:
                     before = tool_context.scene
                     try:
@@ -216,14 +226,17 @@ class ToolLoopAgent(BaseAgent):
             elements_added=sum(element["id"] not in existing_ids for element in tool_context.scene),
             suggestions=finished.get("suggestions", []),
             questions=finished.get("questions", []),
+            file_changes=tool_context.file_changes,
         )
 
     # ------------------------------------------------------------------ helpers
 
-    async def _run_tool(self, call: ToolCall, tool_context: ToolContext) -> tuple[Optional[ToolResult], Optional[str]]:
-        tool = self.registry.get(call.name)
+    async def _run_tool(
+        self, call: ToolCall, tool_context: ToolContext, registry: ToolRegistry
+    ) -> tuple[Optional[ToolResult], Optional[str]]:
+        tool = registry.get(call.name)
         if tool is None:
-            return None, f"Unknown tool '{call.name}'. Available: {', '.join(t.name for t in self.registry)}."
+            return None, f"Unknown tool '{call.name}'. Available: {', '.join(t.name for t in registry)}."
         try:
             return await tool.run(call.arguments, tool_context), None
         except ToolError as exc:

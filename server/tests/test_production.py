@@ -1,0 +1,128 @@
+"""Tests for production-facing pieces: config, persistence, and the CLI."""
+
+from __future__ import annotations
+
+import json
+
+from diorama.config import load_settings
+from diorama.models.canvas import CanvasFile
+from diorama.models.chat import ChatMessage
+from diorama.persistence import SessionStore, deserialize_session, serialize_session
+
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+
+
+def test_settings_default_to_no_workspace_and_local_cors(monkeypatch):
+    for name in ("DIORAMA_WORKSPACE", "DIORAMA_DB", "DIORAMA_CORS_ORIGINS", "DIORAMA_RELOAD"):
+        monkeypatch.delenv(name, raising=False)
+    settings = load_settings()
+    assert settings.workspace_root is None
+    assert settings.reload is False
+    assert settings.database_path is None
+    assert all("localhost" in origin or "127.0.0.1" in origin for origin in settings.cors_origins)
+
+
+def test_settings_read_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("DIORAMA_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("DIORAMA_ALLOW_EXEC", "off")
+    monkeypatch.setenv("DIORAMA_CORS_ORIGINS", "https://app.example.com, https://admin.example.com")
+    monkeypatch.setenv("DIORAMA_DB", str(tmp_path / "sessions.db"))
+    settings = load_settings()
+    assert settings.workspace_root == tmp_path.resolve()
+    assert settings.allow_exec is False
+    assert settings.cors_origins == ["https://app.example.com", "https://admin.example.com"]
+    assert settings.database_path == tmp_path / "sessions.db"
+
+
+def test_wildcard_origin_disables_credentials(monkeypatch):
+    monkeypatch.setenv("DIORAMA_CORS_ORIGINS", "*")
+    monkeypatch.setenv("DIORAMA_CORS_CREDENTIALS", "on")
+    settings = load_settings()
+    assert settings.cors_origins == ["*"]
+    assert settings.allow_credentials is False
+
+
+# --------------------------------------------------------------------------- #
+# Persistence
+# --------------------------------------------------------------------------- #
+
+
+def test_session_serialization_roundtrip():
+    session = {
+        "session_id": "sess-1",
+        "context": None,
+        "messages": [ChatMessage(id="m1", sender="user", content="hi", timestamp="10:00 AM")],
+        "visual_elements": [{"id": "e1", "type": "text", "x": 0, "y": 0, "text": "hello"}],
+        "files": {"asset-1": CanvasFile(mimeType="image/png", dataURL="data:image/png;base64,AAAA")},
+        "turns": [{"turn_id": "turn-1", "visual_elements": [], "files": {}, "file_edits": {"a.py": "old"}}],
+    }
+    restored = deserialize_session(serialize_session(session))
+    assert isinstance(restored["messages"][0], ChatMessage)
+    assert isinstance(restored["files"]["asset-1"], CanvasFile)
+    assert restored["visual_elements"][0]["text"] == "hello"
+    assert restored["turns"][0]["file_edits"] == {"a.py": "old"}
+
+
+def test_session_store_persists_to_sqlite(tmp_path):
+    store = SessionStore(tmp_path / "sessions.db")
+    assert store.enabled
+    session = {
+        "session_id": "sess-2",
+        "context": None,
+        "messages": [ChatMessage(id="m1", sender="user", content="persist me", timestamp="10:00 AM")],
+        "visual_elements": [],
+        "files": {},
+        "turns": [],
+    }
+    store.save(session)
+
+    reopened = SessionStore(tmp_path / "sessions.db")
+    loaded = reopened.load_all()
+    assert "sess-2" in loaded
+    assert loaded["sess-2"]["messages"][0].content == "persist me"
+
+
+def test_session_store_disabled_is_a_noop(tmp_path):
+    store = SessionStore(None)
+    assert store.enabled is False
+    store.save({"session_id": "x", "messages": [], "visual_elements": [], "files": {}, "turns": []})
+    assert store.load_all() == {}
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+def _sample_repo(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "main.py").write_text("from app.helper import run\n\ndef main():\n    return run()\n")
+    (tmp_path / "app" / "helper.py").write_text("def run():\n    return 1\n")
+    return tmp_path
+
+
+def test_cli_index_json(tmp_path, capsys):
+    from diorama.cli import main
+
+    repo = _sample_repo(tmp_path)
+    code = main(["index", str(repo), "--json", "--max-nodes", "10"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    paths = {node["path"] for node in payload["nodes"]}
+    assert "app/main.py" in paths
+
+
+def test_cli_analyze_writes_excalidraw_scene(tmp_path, capsys):
+    from diorama.cli import main
+
+    out = tmp_path / "map.excalidraw"
+    code = main(["analyze", str(_sample_repo(tmp_path)), "-o", str(out)])
+    assert code == 0
+    scene = json.loads(out.read_text())
+    assert scene["type"] == "excalidraw"
+    assert any(element["type"] == "frame" for element in scene["elements"])
+    assert any(element["type"] == "rectangle" for element in scene["elements"])
