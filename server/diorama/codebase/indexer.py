@@ -15,7 +15,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from diorama.codebase.workspace import Workspace
 
@@ -332,7 +332,7 @@ def _module_for_path(path: str, language: str) -> str:
     return "/".join(parts)
 
 
-def _python_module(path: str, package_dirs: set) -> str:
+def _python_module(path: str, package_dirs: Set[str]) -> str:
     """Dotted module for a Python file, anchored at its package root.
 
     A file like ``server/diorama/agents/base.py`` lives in a package chain
