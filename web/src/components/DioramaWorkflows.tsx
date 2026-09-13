@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
+  BookOpen,
   Boxes,
   Database,
   Loader2,
@@ -9,7 +10,8 @@ import {
   Send,
   Workflow,
 } from 'lucide-react';
-import type { AgentStatus } from '@/types/context';
+import { listKnowledgeAnalyses, listKnowledgeRepositories } from '@/lib/api';
+import type { AgentStatus, KbAnalysis, KbRepository } from '@/types/context';
 
 export interface DioramaWorkflow {
   id: string;
@@ -88,6 +90,12 @@ export function DioramaWorkflows({
 }: DioramaWorkflowsProps): React.JSX.Element {
   const [isExpanded, setIsExpanded] = useState(true);
   const [quickQuery, setQuickQuery] = useState('');
+  const [showKnowledge, setShowKnowledge] = useState(false);
+  const [repos, setRepos] = useState<KbRepository[]>([]);
+  const [reposError, setReposError] = useState<string | null>(null);
+  const [isLoadingRepos, setIsLoadingRepos] = useState(false);
+  const [openRepoId, setOpenRepoId] = useState<string | null>(null);
+  const [repoAnalyses, setRepoAnalyses] = useState<KbAnalysis[]>([]);
   const isBusy = BUSY_STATUSES.has(agentStatus);
   const disabled = isBusy || !isConnected;
   const selectionSummary =
@@ -117,6 +125,70 @@ export function DioramaWorkflows({
     }
     runPrompt(query);
     setQuickQuery('');
+  };
+
+  // Load the knowledge base listing when its section is first opened. The
+  // loading flag flips in the click handler so the effect only sets state
+  // asynchronously (inside the promise callbacks).
+  useEffect(() => {
+    if (!showKnowledge || repos.length > 0) {
+      return;
+    }
+    let cancelled = false;
+    listKnowledgeRepositories()
+      .then((result) => {
+        if (!cancelled) {
+          setRepos(result.repositories);
+          setReposError(null);
+        }
+      })
+      .catch((error: Error) => {
+        if (!cancelled) {
+          setReposError(error.message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingRepos(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showKnowledge, repos.length]);
+
+  // Load the analysis history for a repository when it is expanded.
+  useEffect(() => {
+    if (!openRepoId) {
+      return;
+    }
+    let cancelled = false;
+    listKnowledgeAnalyses(openRepoId, 10)
+      .then((result) => {
+        if (!cancelled) {
+          setRepoAnalyses(result.analyses);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRepoAnalyses([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [openRepoId]);
+
+  const handleToggleRepo = (repoId: string): void => {
+    setRepoAnalyses([]);
+    setOpenRepoId((current) => (current === repoId ? null : repoId));
+  };
+
+  const handleToggleKnowledge = (): void => {
+    if (!showKnowledge && repos.length === 0) {
+      setIsLoadingRepos(true);
+    }
+    setShowKnowledge(!showKnowledge);
   };
 
   return (
@@ -207,6 +279,66 @@ export function DioramaWorkflows({
             <RefreshCw className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
             <span>Refresh codebase map</span>
           </button>
+
+          <button
+            className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-left font-medium text-slate-800 transition-colors hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-100 dark:hover:bg-indigo-950/60"
+            disabled={!isConnected}
+            onClick={handleToggleKnowledge}
+            title="Browse the accumulated knowledge base: repositories and their analysis history"
+            type="button"
+          >
+            <BookOpen className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+            <span className="flex-1">Knowledge base</span>
+            <span className="text-[10px] text-slate-400">{showKnowledge ? '−' : '+'}</span>
+          </button>
+
+          {showKnowledge && (
+            <div className="max-h-44 overflow-y-auto rounded-lg bg-slate-50 p-1.5 dark:bg-slate-950/60">
+              {isLoadingRepos && (
+                <div className="flex items-center gap-1.5 px-1 py-1 text-[10px] text-slate-500 dark:text-slate-400">
+                  <Loader2 className="h-3 w-3 animate-spin" /> Loading knowledge base…
+                </div>
+              )}
+              {reposError && (
+                <div className="px-1 py-1 text-[10px] text-rose-600 dark:text-rose-400">{reposError}</div>
+              )}
+              {!isLoadingRepos && !reposError && repos.length === 0 && (
+                <div className="px-1 py-1 text-[10px] text-slate-500 dark:text-slate-400">
+                  No analyses recorded yet. Run a workflow or refresh the map to grow the knowledge base.
+                </div>
+              )}
+              {repos.map((repo) => (
+                <div key={repo.repo_id}>
+                  <button
+                    className="flex w-full items-center gap-1.5 rounded px-1 py-1 text-left transition-colors hover:bg-white dark:hover:bg-slate-800"
+                    onClick={() => handleToggleRepo(repo.repo_id)}
+                    title={repo.root}
+                    type="button"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                      {repo.name}
+                    </span>
+                    <span className="shrink-0 rounded bg-slate-200 px-1 text-[9px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                      {repo.analysis_count} analyses
+                    </span>
+                  </button>
+                  {openRepoId === repo.repo_id &&
+                    (repoAnalyses.length === 0 ? (
+                      <div className="px-2 py-1 text-[10px] text-slate-400">Loading history…</div>
+                    ) : (
+                      <ul className="px-2 py-1">
+                        {repoAnalyses.map((analysis) => (
+                          <li className="flex items-center justify-between gap-1 py-0.5 text-[10px] text-slate-500 dark:text-slate-400" key={analysis.id}>
+                            <span className="font-medium text-slate-600 dark:text-slate-300">{analysis.kind}</span>
+                            <span>{new Date(analysis.created_at).toLocaleString()}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ))}
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="mt-1 border-t border-slate-200 pt-2 dark:border-slate-800">
             <div className="flex items-center gap-1.5">

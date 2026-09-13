@@ -283,3 +283,106 @@ export interface BindWorkspaceResponse {
   codebase: WorkspaceCodebaseSummary | null;
   warning: string | null;
 }
+
+// --------------------------------------------------------------------------- //
+// Deterministic query channel (no LLM round-trip) + knowledge base
+// --------------------------------------------------------------------------- //
+
+export type QueryKind = 'graph' | 'connectivity' | 'architecture' | 'table' | 'changes';
+
+export interface RepositoryIdentity {
+  repo_id: string;
+  root: string;
+  name: string;
+  git_remote: string | null;
+  commit: string | null;
+}
+
+export interface FileChangeSet {
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+/** Response envelope for /api/query/{kind}. */
+export interface QueryResponse<T = unknown> {
+  kind: QueryKind;
+  repo: RepositoryIdentity;
+  signature: string;
+  cached: boolean;
+  changedSinceLastIndex: FileChangeSet;
+  payload: T;
+}
+
+/** Supabase / third-party connector summary from the connectivity map. */
+export interface ConnectorSummary {
+  name: string;
+  kind: string;
+  note: string;
+  files: string[];
+}
+
+export interface TableSummary {
+  name: string;
+  operations: string[];
+  columns: string[];
+  files: string[];
+}
+
+export interface EndpointSummary {
+  method: string;
+  path: string;
+  handler: string;
+  tables: string[];
+}
+
+export interface StateSummary {
+  framework: string;
+  files: number;
+}
+
+export interface ConnectivityPayload {
+  connectors: ConnectorSummary[];
+  tables: TableSummary[];
+  endpoints: EndpointSummary[];
+  state: StateSummary[];
+  rpcFunctions: string[];
+  storageBuckets: string[];
+  clientCalls: Array<Record<string, unknown>>;
+  clientCallsMatched: number;
+}
+
+export interface GraphPayload {
+  nodes: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+/** A repository row in the knowledge base. */
+export interface KbRepository {
+  repo_id: string;
+  root: string;
+  name: string;
+  git_remote: string | null;
+  commit_hash: string | null;
+  signature: string | null;
+  last_indexed_at: string | null;
+  analysis_count: number;
+}
+
+export interface KbAnalysis {
+  id: number;
+  repo_id: string;
+  kind: string;
+  commit_hash: string | null;
+  signature: string | null;
+  created_at: string;
+}
+
+export interface KbArtifact {
+  id: number;
+  repo_id: string;
+  name: string;
+  kind: string;
+  created_at: string;
+}
