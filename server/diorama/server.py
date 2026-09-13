@@ -19,6 +19,8 @@ from diorama.codebase.indexer import build_code_graph
 from diorama.codebase.visualize import graph_to_primitives
 from diorama.codebase.workspace import Workspace, WorkspaceError
 from diorama.config import Settings, get_settings
+from diorama.knowledge import load_knowledge_base
+from diorama.queries import QueryError, run_query
 from diorama.data.default_contexts import DEFAULT_ARCHITECTURE_CONTEXT, MICROSERVICES_CONTEXT
 from diorama.persistence import SessionStore
 from diorama.models.canvas import CanvasFile, CanvasPatch, apply_canvas_patch
@@ -60,6 +62,8 @@ app.add_middleware(
 
 sessions: Dict[str, Dict[str, Any]] = {}
 store = SessionStore(settings.database_path)
+# The durable knowledge base: analyses and artifacts keyed by repo identity.
+knowledge = load_knowledge_base(settings.knowledge_path)
 context_model = OpenRouterContextModel()
 agent = ContextAgent(model=context_model)
 MAX_TURN_SNAPSHOTS = 20
@@ -148,6 +152,12 @@ def bind_workspace_root(raw_path: str) -> Dict[str, Any]:
     workspace = new_workspace
     codebase_seed = fresh
     logger.info("Bound workspace to %s (indexed map: %s)", path, fresh is not None)
+    # A bind is an index event: record the structural graph in the knowledge
+    # base so the repo starts (or resumes) its analysis history.
+    try:
+        run_query(new_workspace, "graph", knowledge)
+    except Exception:  # noqa: BLE001 - the KB must never break binding
+        logger.warning("Could not record bind in the knowledge base", exc_info=True)
     return fresh or {}
 
 CODEBASE_MAP_MAX_NODES = 60
@@ -607,6 +617,47 @@ async def bind_workspace(request: BindWorkspaceRequest) -> Dict[str, Any]:
         if seed and seed.get("indexedFiles")
         else "Bound the directory, but indexing found no source files to map.",
     }
+
+
+@app.get("/api/query/{kind}")
+async def query_codebase(
+    kind: str,
+    table: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Deterministic analysis endpoint the UI can call without an LLM turn.
+
+    Kinds: ``graph``, ``connectivity``, ``architecture``, ``table`` (requires
+    ``table``), ``changes``.  Results come from the knowledge base when the
+    repo's content signature has not changed since the recorded analysis.
+    """
+    if workspace is None:
+        raise HTTPException(status_code=409, detail="No workspace is bound. Choose a directory first.")
+    try:
+        # Queries touch the filesystem; keep the event loop responsive.
+        return await asyncio.to_thread(
+            run_query, workspace, kind, knowledge, table=table, force=force
+        )
+    except QueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/kb/repos")
+async def knowledge_repositories() -> Dict[str, Any]:
+    """Repositories the knowledge base has analyses for."""
+    return {"repositories": knowledge.list_repositories()}
+
+
+@app.get("/api/kb/analyses")
+async def knowledge_analyses(repo_id: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+    """Analysis history, newest first, optionally filtered to one repository."""
+    return {"analyses": knowledge.list_analyses(repo_id=repo_id, limit=limit)}
+
+
+@app.get("/api/kb/artifacts")
+async def knowledge_artifacts(repo_id: Optional[str] = None) -> Dict[str, Any]:
+    """Saved artifacts (exported scenes and other durable outputs)."""
+    return {"artifacts": knowledge.list_artifacts(repo_id=repo_id)}
 
 
 @app.websocket("/ws")

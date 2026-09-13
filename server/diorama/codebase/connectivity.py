@@ -48,6 +48,7 @@ CONNECTOR_PACKAGES: Dict[str, Tuple[str, str, str]] = {
     "@supabase/supabase-js": ("Supabase", "baas", "Postgres + auth + storage SDK"),
     "@supabase/ssr": ("Supabase", "baas", "server-side Supabase client"),
     "@supabase/auth-helpers-nextjs": ("Supabase", "baas", "Next.js auth helpers"),
+    "supabase": ("Supabase", "baas", "Python Supabase SDK"),
     "firebase": ("Firebase", "baas", "client SDK"),
     "firebase-admin": ("Firebase", "baas", "admin SDK"),
     "stripe": ("Stripe", "payments", "server SDK"),

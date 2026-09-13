@@ -10,6 +10,8 @@ here so the rest of the server never reaches for ``os.getenv`` directly:
   DIORAMA_RELOAD        - "on" for uvicorn autoreload (default: off)
   DIORAMA_CORS_ORIGINS  - comma-separated allowed origins (default: local dev)
   DIORAMA_DB            - sqlite path for session persistence (default: disabled)
+  DIORAMA_KB            - sqlite path for the knowledge base
+                          (default: ~/.diorama/knowledge.db; "off" disables)
   DIORAMA_WEB_DIST      - built frontend to serve at "/" (default: ../web/dist)
   DIORAMA_BROWSE_ROOTS  - comma-separated directory prefixes the directory picker
                           may browse and bind (default: unrestricted; for local use)
@@ -23,6 +25,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+from diorama.knowledge import DEFAULT_KB_PATH
 
 DEFAULT_CORS_ORIGINS = (
     "http://localhost:5173",
@@ -76,6 +80,7 @@ class Settings:
     reload: bool = False
     cors_origins: List[str] = field(default_factory=lambda: list(DEFAULT_CORS_ORIGINS))
     database_path: Optional[Path] = None
+    knowledge_path: Optional[Path] = None
     allow_credentials: bool = False
     web_dist: Optional[Path] = None
     browse_roots: Tuple[Path, ...] = ()
@@ -93,6 +98,11 @@ class Settings:
 def load_settings() -> Settings:
     workspace = os.getenv("DIORAMA_WORKSPACE")
     database = os.getenv("DIORAMA_DB")
+    knowledge_env = os.getenv("DIORAMA_KB")
+    if knowledge_env is None or knowledge_env.strip().lower() == "off":
+        knowledge = None if knowledge_env is not None else DEFAULT_KB_PATH
+    else:
+        knowledge = Path(knowledge_env).expanduser()
     web_dist = os.getenv("DIORAMA_WEB_DIST")
     browse_roots_env = os.getenv("DIORAMA_BROWSE_ROOTS")
     origins_env = os.getenv("DIORAMA_CORS_ORIGINS")
@@ -118,6 +128,7 @@ def load_settings() -> Settings:
         reload=_env_bool("DIORAMA_RELOAD", False),
         cors_origins=origins,
         database_path=Path(database).expanduser() if database else None,
+        knowledge_path=knowledge,
         allow_credentials=allow_credentials,
         web_dist=Path(web_dist).expanduser().resolve() if web_dist else DEFAULT_WEB_DIST,
         browse_roots=browse_roots,

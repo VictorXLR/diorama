@@ -1,3 +1,10 @@
+import os
+import tempfile
+
+# Hermetic knowledge base: set before diorama.server is imported anywhere in
+# the suite, so no test ever touches the user's real ~/.diorama/knowledge.db.
+os.environ["DIORAMA_KB"] = os.path.join(tempfile.mkdtemp(prefix="diorama-test-kb-"), "knowledge.db")
+
 import httpx
 import pytest
 
