@@ -167,9 +167,9 @@ export function ChatPanel({
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">Diorama</span>
+              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">Agent Copilot</span>
               <span className="rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-300">
-                {isConnected ? 'Connected' : 'Connecting'}
+                {isConnected ? 'Ready' : 'Connecting'}
               </span>
             </div>
             {contextTitle && (

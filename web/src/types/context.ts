@@ -244,3 +244,42 @@ export type ClientMessage =
       type: 'request_current_state';
       sessionId?: string;
     };
+
+/** A subdirectory the server exposes for repository browsing. */
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export interface WorkspaceBrowseResponse {
+  path: string;
+  parent: string | null;
+  entries: DirectoryEntry[];
+}
+
+/** Codebase map metadata, without the (large) element list. */
+export interface WorkspaceCodebaseSummary {
+  root: string;
+  name: string;
+  totalFiles: number;
+  indexedFiles: number;
+  drawnFiles: number;
+  edges: number;
+  languages: Record<string, number>;
+  languagesLabel: string;
+  truncated: boolean;
+}
+
+export interface WorkspaceStatusResponse {
+  root: string | null;
+  name: string | null;
+  codebase: WorkspaceCodebaseSummary | null;
+  execEnabled: boolean;
+}
+
+export interface BindWorkspaceResponse {
+  root: string | null;
+  name: string | null;
+  codebase: WorkspaceCodebaseSummary | null;
+  warning: string | null;
+}

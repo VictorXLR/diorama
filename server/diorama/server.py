@@ -1,15 +1,16 @@
 import copy
 import json
 import logging
+import asyncio
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from diorama.agents.base import AgentContext, PatchEvent, ResponseEvent, StatusEvent, ThoughtEvent
 from diorama.agents.context_agent import ContextAgent
@@ -62,6 +63,9 @@ store = SessionStore(settings.database_path)
 context_model = OpenRouterContextModel()
 agent = ContextAgent(model=context_model)
 MAX_TURN_SNAPSHOTS = 20
+# Serializes workspace rebinding so two concurrent binds cannot interleave their
+# global mutations; indexing itself runs in a thread to keep the loop serving.
+bind_lock = asyncio.Lock()
 CAPABILITIES = [
     "visual_context",
     "excalidraw_whiteboard",
@@ -94,6 +98,57 @@ def build_workspace(settings: Settings) -> Optional[Workspace]:
 
 
 workspace: Optional[Workspace] = build_workspace(settings)
+
+# Directories that are never useful to browse when choosing a repository root.
+SKIP_BROWSE_DIRS = {"node_modules", "__pycache__", ".venv", "venv", ".next", "dist", "build", ".turbo", ".cache"}
+MAX_BROWSE_ENTRIES = 500
+
+
+def assert_path_allowed(path: Path) -> None:
+    """Enforce the optional DIORAMA_BROWSE_ROOTS allowlist.
+
+    Unrestricted by default (the tool is local-first), but a deployment can pin
+    browsing and binding to a set of directory prefixes.
+    """
+    roots = settings.browse_roots
+    if not roots:
+        return
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return
+        except ValueError:
+            continue
+    raise HTTPException(status_code=403, detail=f"{path} is outside the allowed browse roots.")
+
+
+def bind_workspace_root(raw_path: str) -> Dict[str, Any]:
+    """Point the code tools at a new repository root and re-index it.
+
+    Raises ``WorkspaceError`` for unreadable paths.  Binding succeeds even when
+    indexing produces no map (e.g. an empty folder); the caller gets a warning
+    so the UI can explain the empty board.
+    """
+    global workspace, codebase_seed
+    path = Path(raw_path).expanduser().resolve()
+    if not path.is_dir():
+        raise WorkspaceError(f"Not a directory: {path}")
+    try:
+        assert_path_allowed(path)
+    except HTTPException as exc:
+        raise WorkspaceError(str(exc.detail)) from exc
+    new_workspace = Workspace(
+        path,
+        max_read_bytes=settings.max_read_bytes,
+        max_output_bytes=settings.max_output_bytes,
+        exec_timeout=settings.exec_timeout,
+        allow_exec=settings.allow_exec,
+    )
+    fresh = build_codebase_seed(new_workspace)
+    workspace = new_workspace
+    codebase_seed = fresh
+    logger.info("Bound workspace to %s (indexed map: %s)", path, fresh is not None)
+    return fresh or {}
 
 CODEBASE_MAP_MAX_NODES = 60
 CODEBASE_SUGGESTIONS = [
@@ -484,6 +539,74 @@ async def get_presets() -> list[Dict[str, str]]:
             "summary": "Distributed services with an event-stream backbone",
         },
     ]
+
+
+class BindWorkspaceRequest(BaseModel):
+    path: str
+
+
+def workspace_codebase_summary() -> Optional[Dict[str, Any]]:
+    """Seed metadata safe to send to the browser (never the element list)."""
+    if codebase_seed is None:
+        return None
+    return {key: value for key, value in codebase_seed.items() if key != "visual_elements"}
+
+
+@app.get("/api/workspace")
+async def get_workspace_status() -> Dict[str, Any]:
+    """Describe the currently bound repository for the directory picker UI."""
+    return {
+        "root": str(workspace.root) if workspace is not None else None,
+        "name": workspace.root.name if workspace is not None else None,
+        "codebase": workspace_codebase_summary(),
+        "execEnabled": bool(workspace and workspace.allow_exec),
+    }
+
+
+@app.get("/api/workspace/browse")
+async def browse_workspace_directories(path: Optional[str] = None) -> Dict[str, Any]:
+    """List subdirectories of a server-side path so the browser can pick one."""
+    base = Path(path).expanduser() if path else Path.home()
+    try:
+        resolved = base.resolve()
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail=f"Not a directory: {resolved}")
+        assert_path_allowed(resolved)
+        entries = []
+        truncated = False
+        for child in sorted(resolved.iterdir(), key=lambda item: item.name.lower()):
+            if not child.is_dir() or child.name.startswith(".") or child.name in SKIP_BROWSE_DIRS:
+                continue
+            if len(entries) >= MAX_BROWSE_ENTRIES:
+                truncated = True
+                break
+            entries.append({"name": child.name, "path": str(child)})
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not list {base}: {exc}") from exc
+    parent = str(resolved.parent) if resolved.parent != resolved else None
+    return {"path": str(resolved), "parent": parent, "entries": entries, "truncated": truncated}
+
+
+@app.post("/api/workspace/bind")
+async def bind_workspace(request: BindWorkspaceRequest) -> Dict[str, Any]:
+    """Bind a new repository root, index it, and report what was drawn."""
+    try:
+        # Serialize binds and keep the event loop responsive while indexing.
+        async with bind_lock:
+            seed = await asyncio.to_thread(bind_workspace_root, request.path)
+    except WorkspaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    summary = workspace_codebase_summary()
+    return {
+        "root": str(workspace.root) if workspace is not None else None,
+        "name": workspace.root.name if workspace is not None else None,
+        "codebase": summary,
+        "warning": None
+        if seed and seed.get("indexedFiles")
+        else "Bound the directory, but indexing found no source files to map.",
+    }
 
 
 @app.websocket("/ws")

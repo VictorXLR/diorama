@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef } from 'react';
 import { CaptureUpdateAction, Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import type { BinaryFileData, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
-import { Maximize2, Sparkles, Trash2 } from 'lucide-react';
+import { DioramaWorkflows } from '@/components/DioramaWorkflows';
+import type { AgentStatus, CanvasFiles } from '@/types/context';
 import type { WhiteboardElements } from '@/lib/whiteboardGenerator';
 import { sceneSignature } from '@/lib/sceneSignature';
-import type { CanvasFiles } from '@/types/context';
 
 export interface WhiteboardProps {
   elements: WhiteboardElements;
@@ -16,9 +16,17 @@ export interface WhiteboardProps {
   onApiReady?: (api: ExcalidrawImperativeAPI) => void;
   /** Receives direct user edits so they can be persisted and synced to the server. */
   onElementsChange?: (elements: WhiteboardElements) => void;
-  onClearBoard?: () => void;
+  /** Reports the ids of the currently selected elements (empty when none). */
+  onSelectionChange?: (elementIds: string[]) => void;
+  /** Sends a Diorama workflow prompt to the agent, straight from the canvas. */
+  onRunWorkflow?: (prompt: string) => void;
+  /** Re-indexes the workspace and redraws the generated codebase map. */
+  onRefreshCodebaseMap?: () => void;
+  agentStatus?: AgentStatus;
+  isConnected?: boolean;
+  /** Text of the currently selected elements, for selection-aware queries. */
+  selectedLabels?: string[];
   theme?: 'light' | 'dark';
-  title?: string;
 }
 
 const CANVAS_BACKGROUND: Record<'light' | 'dark', string> = {
@@ -43,14 +51,19 @@ export function Whiteboard({
   highlightIds,
   onApiReady,
   onElementsChange,
-  onClearBoard,
+  onSelectionChange,
+  onRunWorkflow,
+  onRefreshCodebaseMap,
+  agentStatus = 'idle',
+  isConnected = false,
+  selectedLabels = [],
   theme = 'light',
-  title = 'Context canvas',
 }: WhiteboardProps): React.JSX.Element {
   const excalidrawApiRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const previousElementsRef = useRef<WhiteboardElements>([]);
   const loadedFileIdsRef = useRef<Set<string>>(new Set());
   const sceneSignatureRef = useRef(sceneSignature(elements));
+  const lastSelectionRef = useRef<string[]>([]);
   const resolvedFiles = files ?? EMPTY_FILES;
 
   // Register image assets before the elements that reference them render, otherwise Excalidraw
@@ -155,36 +168,6 @@ export function Whiteboard({
     [elements, resolvedFiles, onApiReady, syncFiles, updateGeneratedScene],
   );
 
-  const handleFitToScreen = useCallback((): void => {
-    const api = excalidrawApiRef.current;
-    const sceneElements = api?.getSceneElements();
-    if (!api || !sceneElements?.length) {
-      return;
-    }
-
-    try {
-      api.scrollToContent(sceneElements, {
-        animate: true,
-        duration: 350,
-        fitToViewport: true,
-        viewportZoomFactor: 0.85,
-      });
-    } catch {
-      api.scrollToContent();
-    }
-  }, []);
-
-  const handleClear = useCallback((): void => {
-    // The button below owns this user action and persists it through
-    // onClearBoard. Do not also turn Excalidraw's imperative reset callback
-    // into a debounced whole-scene sync.
-    sceneSignatureRef.current = sceneSignature([]);
-    excalidrawApiRef.current?.resetScene();
-    previousElementsRef.current = [];
-    loadedFileIdsRef.current = new Set();
-    onClearBoard?.();
-  }, [onClearBoard]);
-
   // Keep the canvas background in step with the app theme.
   useEffect(() => {
     excalidrawApiRef.current?.updateScene({
@@ -200,14 +183,23 @@ export function Whiteboard({
             loadScene: false,
             saveToActiveFile: false,
             toggleTheme: false,
+            // Diorama owns these actions with its own board controls.
+            clearCanvas: false,
+            saveAsImage: false,
+            changeViewBackgroundColor: false,
           },
         }}
         excalidrawAPI={handleExcalidrawRef}
-        onChange={(nextElements) => {
+        onChange={(nextElements, appState) => {
           const nextSignature = sceneSignature(nextElements);
           if (nextSignature !== sceneSignatureRef.current) {
             sceneSignatureRef.current = nextSignature;
             onElementsChange?.([...nextElements] as WhiteboardElements);
+          }
+          const selectedIds = Object.keys(appState.selectedElementIds ?? {});
+          if (selectedIds.join('\u0000') !== lastSelectionRef.current.join('\u0000')) {
+            lastSelectionRef.current = selectedIds;
+            onSelectionChange?.(selectedIds);
           }
         }}
         initialData={{
@@ -221,33 +213,15 @@ export function Whiteboard({
         theme={theme}
       />
 
-      <div className="absolute top-4 left-4 z-10 flex items-center gap-2 rounded-xl border border-slate-200/80 bg-white/90 px-3.5 py-2 text-xs text-slate-700 shadow-sm backdrop-blur-md dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-200">
-        <div className="flex items-center gap-1.5 font-medium">
-          <Sparkles className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-          <span className="max-w-56 truncate font-semibold text-slate-800 dark:text-slate-100">{title}</span>
-        </div>
-        <div className="h-3.5 w-px bg-slate-200 dark:bg-slate-700" />
-        <span className="text-slate-500 dark:text-slate-400">{elements.length} elements</span>
-        <div className="h-3.5 w-px bg-slate-200 dark:bg-slate-700" />
-        <button
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-          onClick={handleFitToScreen}
-          title="Fit view to whiteboard content"
-          type="button"
-        >
-          <Maximize2 className="h-3.5 w-3.5" />
-          <span>Fit view</span>
-        </button>
-        <button
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-slate-500 transition-colors hover:bg-rose-50 hover:text-rose-600 dark:text-slate-400 dark:hover:bg-rose-950 dark:hover:text-rose-300"
-          onClick={handleClear}
-          title="Clear whiteboard"
-          type="button"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-          <span>Clear</span>
-        </button>
-      </div>
+      {onRunWorkflow && onRefreshCodebaseMap && (
+        <DioramaWorkflows
+          agentStatus={agentStatus}
+          isConnected={isConnected}
+          onRefreshCodebaseMap={onRefreshCodebaseMap}
+          onRunWorkflow={onRunWorkflow}
+          selectedLabels={selectedLabels}
+        />
+      )}
     </div>
   );
 }

@@ -3,9 +3,13 @@ import type React from 'react';
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types';
 import { ChatPanel } from '@/components/ChatPanel';
 import { HeaderNav } from '@/components/HeaderNav';
+import { LandingPage } from '@/components/LandingPage';
 import { ResizeHandle } from '@/components/ResizeHandle';
+import { Sidebar } from '@/components/Sidebar';
 import { Whiteboard } from '@/components/Whiteboard';
+import { WorkspacePicker } from '@/components/WorkspacePicker';
 import { MAX_CHAT_WIDTH, MIN_CHAT_WIDTH, sortConversations, useWorkspaceStore } from '@/lib/store';
+import { WEBSOCKET_URL } from '@/lib/api';
 import { convertServerWhiteboardElements } from '@/lib/whiteboardGenerator';
 import type { WhiteboardElements } from '@/lib/whiteboardGenerator';
 import type {
@@ -17,12 +21,6 @@ import type {
   ExcalidrawSkeletonElement,
   ServerMessage,
 } from '@/types/context';
-
-// Default to the origin that served the app, so the built bundle talks to
-// whatever host/port is serving it. Override with VITE_API_BASE_URL / VITE_WS_URL
-// for split deployments (or the Vite dev server, which proxies to the backend).
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? window.location.origin;
-const WEBSOCKET_URL = import.meta.env.VITE_WS_URL ?? `${API_BASE_URL.replace(/^http/, 'ws').replace(/\/$/, '')}/ws`;
 
 const EMPTY_ELEMENTS: WhiteboardElements = [];
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -103,6 +101,41 @@ export function App(): React.JSX.Element {
   const mergeFiles = useWorkspaceStore((state) => state.mergeFiles);
   // Element ids to flash on the board; a fresh array each time so re-highlighting the same ids works.
   const [highlightIds, setHighlightIds] = useState<string[] | null>(null);
+  const [activeView, setActiveView] = useState<'landing' | 'workspace'>('landing');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isPickerOpen, setIsPickerOpen] = useState(false);
+  const landingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Show the landing page initially for 5 seconds before transitioning to the main UI.
+  useEffect(() => {
+    landingTimeoutRef.current = setTimeout(() => {
+      setActiveView((current) => (current === 'landing' ? 'workspace' : current));
+      landingTimeoutRef.current = null;
+    }, 5000);
+
+    return () => {
+      if (landingTimeoutRef.current) {
+        clearTimeout(landingTimeoutRef.current);
+        landingTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleNavigateLanding = useCallback((): void => {
+    if (landingTimeoutRef.current) {
+      clearTimeout(landingTimeoutRef.current);
+      landingTimeoutRef.current = null;
+    }
+    setActiveView('landing');
+  }, []);
+
+  const handleNavigateWorkspace = useCallback((): void => {
+    if (landingTimeoutRef.current) {
+      clearTimeout(landingTimeoutRef.current);
+      landingTimeoutRef.current = null;
+    }
+    setActiveView('workspace');
+  }, []);
 
   const connectionState: ConnectionState =
     sessionUi.conversationId === activeConversationId ? sessionUi.connection : 'connecting';
@@ -385,6 +418,25 @@ export function App(): React.JSX.Element {
     [sendSocketMessage, setAgentStatus],
   );
 
+  const handleFitView = useCallback((): void => {
+    const api = excalidrawApiRef.current;
+    const sceneElements = api?.getSceneElements();
+    if (!api || !sceneElements?.length) {
+      return;
+    }
+
+    try {
+      api.scrollToContent(sceneElements, {
+        animate: true,
+        duration: 350,
+        fitToViewport: true,
+        viewportZoomFactor: 0.85,
+      });
+    } catch {
+      api.scrollToContent();
+    }
+  }, []);
+
   const handleShowOnBoard = useCallback((elementIds: string[]): void => {
     const api = excalidrawApiRef.current;
     if (!api || elementIds.length === 0) {
@@ -437,61 +489,145 @@ export function App(): React.JSX.Element {
     sendSocketMessage({ type: 'refresh_codebase_map' });
   }, [sendSocketMessage]);
 
+  const handleChooseDirectory = useCallback((): void => {
+    setIsPickerOpen(true);
+  }, []);
+
+  const handleWorkspaceBound = useCallback((): void => {
+    // The server re-indexed the new root; redraw this session's board from it.
+    handleRefreshCodebaseMap();
+  }, [handleRefreshCodebaseMap]);
+
   const handleCreateConversation = useCallback((): void => {
     createConversation();
-  }, [createConversation]);
+    handleNavigateWorkspace();
+  }, [createConversation, handleNavigateWorkspace]);
+
+  const handleSelectConversation = useCallback(
+    (id: string): void => {
+      selectConversation(id);
+      handleNavigateWorkspace();
+    },
+    [handleNavigateWorkspace, selectConversation],
+  );
 
   const handleApiReady = useCallback((api: ExcalidrawImperativeAPI): void => {
     excalidrawApiRef.current = api;
   }, []);
 
+  const [selectionIds, setSelectionIds] = useState<string[]>([]);
+  const handleSelectionChange = useCallback((elementIds: string[]): void => {
+    setSelectionIds((prev) =>
+      prev.length === elementIds.length && prev.every((id, i) => id === elementIds[i])
+        ? prev
+        : elementIds,
+    );
+  }, []);
+
   const context = activeConversation?.context ?? null;
   const messages = activeConversation?.messages ?? EMPTY_MESSAGES;
   const whiteboardElements = activeConversation?.whiteboardElements ?? EMPTY_ELEMENTS;
+
+  const selectedLabels = useMemo(() => {
+    const labels: string[] = [];
+    for (const id of selectionIds) {
+      const element = whiteboardElements.find((el) => el.id === id) as
+        | { text?: unknown }
+        | undefined;
+      const text = typeof element?.text === 'string' ? element.text.trim() : '';
+      if (text) {
+        labels.push(text.length > 80 ? `${text.slice(0, 77)}...` : text);
+      }
+      if (labels.length >= 8) break;
+    }
+    return labels;
+  }, [selectionIds, whiteboardElements]);
+
   const files = activeConversation?.files;
   const workspaceTitle = context?.title ?? activeConversation?.title ?? 'New visual context';
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <HeaderNav
+        activeView={activeView}
+        boardElementCount={whiteboardElements.length}
         connectionState={connectionState}
+        isSidebarOpen={isSidebarOpen}
         onClearBoard={handleClearBoard}
+        onChooseDirectory={handleChooseDirectory}
+        onFitView={handleFitView}
+        onNavigateLanding={handleNavigateLanding}
         onRefreshCodebaseMap={handleRefreshCodebaseMap}
+        onToggleSidebar={() => setIsSidebarOpen((open) => !open)}
         onToggleTheme={toggleTheme}
         theme={theme}
         workspaceTitle={workspaceTitle}
       />
 
-      <main className="flex min-h-0 flex-1 overflow-hidden">
-        <Whiteboard
-          elements={whiteboardElements}
-          files={files}
-          highlightIds={highlightIds}
-          onApiReady={handleApiReady}
-          onClearBoard={handleClearBoard}
-          onElementsChange={handleElementsChange}
-          theme={theme}
-          title={workspaceTitle}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <Sidebar
+          activeConversationId={activeConversationId}
+          activeTab={activeView}
+          conversations={conversations}
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+          onCreateConversation={handleCreateConversation}
+          onDeleteConversation={deleteConversation}
+          onNavigateLanding={handleNavigateLanding}
+          onNavigateWorkspace={handleNavigateWorkspace}
+          onSelectConversation={handleSelectConversation}
+          workspaceTitle={workspaceTitle}
         />
-        <ResizeHandle maxWidth={MAX_CHAT_WIDTH} minWidth={MIN_CHAT_WIDTH} onResize={setChatWidth} width={chatWidth} />
-        <div className="h-full shrink-0" style={{ width: chatWidth }}>
-          <ChatPanel
-            activeConversationId={activeConversationId}
-            agentStatus={agentStatus}
-            contextTitle={context?.title}
+
+        {activeView === 'landing' ? (
+          <LandingPage
             conversations={conversations}
             isConnected={connectionState === 'connected'}
-            messages={messages}
-            onCreateConversation={handleCreateConversation}
-            onDeleteConversation={deleteConversation}
-            onResetWorkspace={handleResetWorkspace}
-            onSelectConversation={selectConversation}
-            onSendMessage={handleSendMessage}
-            onShowOnBoard={handleShowOnBoard}
-            onRevertTurn={handleRevertTurn}
+            onNewConversation={handleCreateConversation}
+            onOpenWorkspace={handleNavigateWorkspace}
+            onSelectConversation={handleSelectConversation}
+            workspaceTitle={context?.title ?? activeConversation?.title}
           />
-        </div>
-      </main>
+        ) : (
+          <main className="flex min-h-0 flex-1 overflow-hidden">
+            <Whiteboard
+              agentStatus={agentStatus}
+              elements={whiteboardElements}
+              files={files}
+              highlightIds={highlightIds}
+              isConnected={connectionState === 'connected'}
+              onApiReady={handleApiReady}
+              onElementsChange={handleElementsChange}
+              onRefreshCodebaseMap={handleRefreshCodebaseMap}
+              onRunWorkflow={handleSendMessage}
+              onSelectionChange={handleSelectionChange}
+              selectedLabels={selectedLabels}
+              theme={theme}
+            />
+            <ResizeHandle maxWidth={MAX_CHAT_WIDTH} minWidth={MIN_CHAT_WIDTH} onResize={setChatWidth} width={chatWidth} />
+            <div className="h-full shrink-0" style={{ width: chatWidth }}>
+              <ChatPanel
+                activeConversationId={activeConversationId}
+                agentStatus={agentStatus}
+                contextTitle={context?.title}
+                conversations={conversations}
+                isConnected={connectionState === 'connected'}
+                messages={messages}
+                onCreateConversation={handleCreateConversation}
+                onDeleteConversation={deleteConversation}
+                onResetWorkspace={handleResetWorkspace}
+                onSelectConversation={selectConversation}
+                onSendMessage={handleSendMessage}
+                onShowOnBoard={handleShowOnBoard}
+                onRevertTurn={handleRevertTurn}
+              />
+            </div>
+          </main>
+        )}
+      </div>
+      {isPickerOpen && (
+        <WorkspacePicker onClose={() => setIsPickerOpen(false)} onWorkspaceBound={handleWorkspaceBound} />
+      )}
     </div>
   );
 }

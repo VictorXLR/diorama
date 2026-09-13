@@ -11,6 +11,8 @@ here so the rest of the server never reaches for ``os.getenv`` directly:
   DIORAMA_CORS_ORIGINS  - comma-separated allowed origins (default: local dev)
   DIORAMA_DB            - sqlite path for session persistence (default: disabled)
   DIORAMA_WEB_DIST      - built frontend to serve at "/" (default: ../web/dist)
+  DIORAMA_BROWSE_ROOTS  - comma-separated directory prefixes the directory picker
+                          may browse and bind (default: unrestricted; for local use)
   DIORAMA_MAX_READ_BYTES / DIORAMA_MAX_OUTPUT_BYTES
 """
 
@@ -20,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 DEFAULT_CORS_ORIGINS = (
     "http://localhost:5173",
@@ -76,6 +78,7 @@ class Settings:
     database_path: Optional[Path] = None
     allow_credentials: bool = False
     web_dist: Optional[Path] = None
+    browse_roots: Tuple[Path, ...] = ()
 
     @property
     def code_enabled(self) -> bool:
@@ -91,11 +94,17 @@ def load_settings() -> Settings:
     workspace = os.getenv("DIORAMA_WORKSPACE")
     database = os.getenv("DIORAMA_DB")
     web_dist = os.getenv("DIORAMA_WEB_DIST")
+    browse_roots_env = os.getenv("DIORAMA_BROWSE_ROOTS")
     origins_env = os.getenv("DIORAMA_CORS_ORIGINS")
     if origins_env:
         origins = [origin.strip() for origin in origins_env.split(",") if origin.strip()]
     else:
         origins = list(DEFAULT_CORS_ORIGINS)
+    browse_roots = tuple(
+        Path(root.strip()).expanduser().resolve()
+        for root in (browse_roots_env or "").split(",")
+        if root.strip()
+    )
     # A wildcard origin cannot be combined with credentialed requests.
     allow_credentials = "*" not in origins and _env_bool("DIORAMA_CORS_CREDENTIALS", False)
     return Settings(
@@ -111,6 +120,7 @@ def load_settings() -> Settings:
         database_path=Path(database).expanduser() if database else None,
         allow_credentials=allow_credentials,
         web_dist=Path(web_dist).expanduser().resolve() if web_dist else DEFAULT_WEB_DIST,
+        browse_roots=browse_roots,
     )
 
 
