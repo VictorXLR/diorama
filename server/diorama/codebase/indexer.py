@@ -29,6 +29,8 @@ LANGUAGE_BY_SUFFIX: Dict[str, str] = {
     ".pyi": "python",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
     ".js": "javascript",
     ".jsx": "javascript",
     ".mjs": "javascript",
@@ -356,7 +358,7 @@ def _parse_with_tree_sitter(suffix: str, source: str) -> Tuple[List[CodeSymbol],
 
 def _module_for_path(path: str, language: str) -> str:
     stem = path
-    for suffix in (".pyi", ".py", ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs"):
+    for suffix in (".pyi", ".py", ".tsx", ".ts", ".mts", ".cts", ".jsx", ".js", ".mjs", ".cjs"):
         if stem.endswith(suffix):
             stem = stem[: -len(suffix)]
             break

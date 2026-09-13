@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from diorama.codebase.connectivity import build_connectivity_map, connectivity_to_primitives
 from diorama.codebase.indexer import build_code_graph
 from diorama.codebase.visualize import graph_to_primitives
 from diorama.codebase.workspace import WorkspaceError
@@ -102,6 +103,19 @@ class EditFileArgs(BaseModel):
 
     path: str = Field(description="File path relative to the repository root.")
     edits: List[FileEdit] = Field(min_length=1, description="One or more exact-string replacements.")
+
+
+class MapConnectivityArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    include_tests: bool = Field(default=False, alias="includeTests")
+
+
+class VisualizeConnectivityArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    title: Optional[str] = Field(default=None, description="Heading for the board.")
+    include_tests: bool = Field(default=False, alias="includeTests")
 
 
 class RunCommandArgs(BaseModel):
@@ -242,6 +256,50 @@ async def _visualize_codebase(args: VisualizeCodebaseArgs, context: ToolContext)
     )
 
 
+async def _map_connectivity(args: MapConnectivityArgs, context: ToolContext) -> ToolResult:
+    """Map how the app is wired: connectors, tables, endpoints, UI calls, state."""
+    workspace = context.require_workspace()
+    graph = build_code_graph(workspace, include_tests=args.include_tests)
+    connectivity = build_connectivity_map(workspace, graph)
+    summary = connectivity.to_summary()
+    return ToolResult(
+        content=summary,
+        summary=(
+            f"{len(connectivity.connectors)} connector(s), {len(connectivity.tables)} table(s), "
+            f"{len(connectivity.endpoints)} endpoint(s), {len(connectivity.state)} state framework(s)"
+        ),
+    )
+
+
+async def _visualize_connectivity(args: VisualizeConnectivityArgs, context: ToolContext) -> ToolResult:
+    """Draw the API connectivity map: connectors + tables, endpoints, UI, state."""
+    workspace = context.require_workspace()
+    graph = build_code_graph(workspace, include_tests=args.include_tests)
+    connectivity = build_connectivity_map(workspace, graph)
+    primitives = connectivity_to_primitives(
+        connectivity,
+        title=args.title or f"API connectivity · {workspace.root.name}",
+    )
+    patch = CanvasPatch(primitives=primitives)
+    matched = sum(1 for call in connectivity.client_calls if call.endpoint)
+    return ToolResult(
+        content={
+            "connectors": [connector.name for connector in connectivity.connectors],
+            "tables": [table.name for table in connectivity.tables],
+            "endpoints": len(connectivity.endpoints),
+            "clientCallsMatched": matched,
+            "state": [usage.framework for usage in connectivity.state],
+            "note": "Left column: connectors and their tables (zoom into Supabase here). "
+            "Middle: HTTP endpoints. Right: UI surfaces and state. Arrows show request and data flow.",
+        },
+        patch=patch,
+        summary=(
+            f"Drew the connectivity map: {len(connectivity.connectors)} connector(s), "
+            f"{len(connectivity.tables)} table(s), {len(connectivity.endpoints)} endpoint(s)"
+        ),
+    )
+
+
 def _strip_line_numbers(numbered: str) -> str:
     lines = []
     for line in numbered.splitlines():
@@ -290,6 +348,31 @@ VISUALIZE_CODEBASE_TOOL = Tool(
     mutates_canvas=True,
 )
 
+MAP_CONNECTIVITY_TOOL = Tool(
+    name="map_connectivity",
+    description=(
+        "Map how the app is wired together: external API connectors (Supabase, Firebase, Stripe, "
+        "OpenAI, ...), database tables with their operations and columns, HTTP endpoints, which UI "
+        "files call them, and state management. Returns structured JSON. Use when the user asks how "
+        "APIs connect, how the database is structured, or how data flows to the UI."
+    ),
+    args_model=MapConnectivityArgs,
+    handler=_map_connectivity,
+)
+
+VISUALIZE_CONNECTIVITY_TOOL = Tool(
+    name="visualize_connectivity",
+    description=(
+        "Draw the API connectivity map on the board: connectors and their database tables on the "
+        "left (zoom into Supabase connections and table structure here), HTTP endpoints in the "
+        "middle, UI surfaces and state management on the right, with arrows for request and data "
+        "flow. Use when the user asks to see how endpoints, the database, and the UI are connected."
+    ),
+    args_model=VisualizeConnectivityArgs,
+    handler=_visualize_connectivity,
+    mutates_canvas=True,
+)
+
 WRITE_FILE_TOOL = Tool(
     name="write_file",
     description="Create or fully replace a file. Prefer edit_file for small changes; this overwrites the whole file.",
@@ -317,6 +400,8 @@ CODE_TOOLS = [
     SEARCH_CODE_TOOL,
     INDEX_CODEBASE_TOOL,
     VISUALIZE_CODEBASE_TOOL,
+    MAP_CONNECTIVITY_TOOL,
+    VISUALIZE_CONNECTIVITY_TOOL,
     WRITE_FILE_TOOL,
     EDIT_FILE_TOOL,
     RUN_COMMAND_TOOL,
